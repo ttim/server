@@ -2753,6 +2753,8 @@ if __name__ == "__main__":
         if not FLAGS.no_container_build:
             # Commands to collect all the build artifacts needed for CI
             # testing.
+            if FLAGS.ci_split:
+                cmake_script = split_cmake_script("cmake_build_collect" )
             cibase_build(
                 cmake_script,
                 script_repo_dir,
