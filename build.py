@@ -1602,57 +1602,59 @@ def create_docker_build_script(script_name, container_install_dir, container_ci_
             ],
             check_exitcode=True,
         )
-        docker_script.cmd(
-            [
+        
+        if not FLAGS.ci_split:
+            docker_script.cmd(
+                [
+                    "docker",
+                    "cp",
+                    "tritonserver_builder:/tmp/tritonbuild/ci",
+                    FLAGS.build_dir,
+                ],
+                check_exitcode=True,
+            )
+
+            #
+            # Final image... tritonserver
+            #
+            docker_script.blankln()
+            docker_script.commentln(8)
+            docker_script.comment("Create final tritonserver image")
+            docker_script.comment()
+
+            finalargs = [
                 "docker",
-                "cp",
-                "tritonserver_builder:/tmp/tritonbuild/ci",
-                FLAGS.build_dir,
-            ],
-            check_exitcode=True,
-        )
+                "build",
+                "-t",
+                "tritonserver",
+                "-f",
+                os.path.join(FLAGS.build_dir, "Dockerfile"),
+                ".",
+            ]
 
-        #
-        # Final image... tritonserver
-        #
-        docker_script.blankln()
-        docker_script.commentln(8)
-        docker_script.comment("Create final tritonserver image")
-        docker_script.comment()
+            docker_script.cwd(THIS_SCRIPT_DIR)
+            docker_script.cmd(finalargs, check_exitcode=True)
 
-        finalargs = [
-            "docker",
-            "build",
-            "-t",
-            "tritonserver",
-            "-f",
-            os.path.join(FLAGS.build_dir, "Dockerfile"),
-            ".",
-        ]
+            #
+            # CI base image... tritonserver_cibase
+            #
+            docker_script.blankln()
+            docker_script.commentln(8)
+            docker_script.comment("Create CI base image")
+            docker_script.comment()
 
-        docker_script.cwd(THIS_SCRIPT_DIR)
-        docker_script.cmd(finalargs, check_exitcode=True)
+            cibaseargs = [
+                "docker",
+                "build",
+                "-t",
+                "tritonserver_cibase",
+                "-f",
+                os.path.join(FLAGS.build_dir, "Dockerfile.cibase"),
+                ".",
+            ]
 
-        #
-        # CI base image... tritonserver_cibase
-        #
-        docker_script.blankln()
-        docker_script.commentln(8)
-        docker_script.comment("Create CI base image")
-        docker_script.comment()
-
-        cibaseargs = [
-            "docker",
-            "build",
-            "-t",
-            "tritonserver_cibase",
-            "-f",
-            os.path.join(FLAGS.build_dir, "Dockerfile.cibase"),
-            ".",
-        ]
-
-        docker_script.cwd(THIS_SCRIPT_DIR)
-        docker_script.cmd(cibaseargs, check_exitcode=True)
+            docker_script.cwd(THIS_SCRIPT_DIR)
+            docker_script.cmd(cibaseargs, check_exitcode=True)
 
 
 def core_build(
