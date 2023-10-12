@@ -29,6 +29,8 @@ cmake_minimum_required(VERSION 3.18)
 project(tritonserver LANGUAGES C CXX)
 
 include(CMakeDependentOption)
+include(CPack)
+set(CPACK_SOURCE_GENERATOR "TGZ")
 
 set(TRITON_VERSION "0.0.0" CACHE STRING "The version of the Triton shared library" )
 
