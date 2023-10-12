@@ -114,7 +114,7 @@ add_executable(
 # main.exe and then for windows after installing we rename it to
 # tritonserver.exe (below in the install steps).
 if (NOT WIN32)
-  set_property(TARGET main PROPERTY OUTPUT_NAME tritonserver)
+  # set_property(TARGET main PROPERTY OUTPUT_NAME tritonserver)
 endif()
 
 target_compile_features(main PRIVATE cxx_std_11)
@@ -270,6 +270,7 @@ if (NOT WIN32)
   install(
     TARGETS main
     RUNTIME DESTINATION bin
+    RENAME tritonserver
   )
 else()
   # See explanation above as to why we need to rename main.exe to
