@@ -29,7 +29,7 @@ cmake_minimum_required (VERSION 3.18)
 project(tritonserverexe LANGUAGES C CXX)
 
 include(GNUInstallDirs)
-
+include(CPack)
 #
 # Dependencies
 #
@@ -114,7 +114,7 @@ add_executable(
 # main.exe and then for windows after installing we rename it to
 # tritonserver.exe (below in the install steps).
 if (NOT WIN32)
-  # set_property(TARGET main PROPERTY OUTPUT_NAME tritonserver)
+  set_property(TARGET main PROPERTY OUTPUT_NAME tritonserver)
 endif()
 
 target_compile_features(main PRIVATE cxx_std_11)
