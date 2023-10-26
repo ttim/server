@@ -1511,11 +1511,7 @@ def create_docker_build_script(script_name, container_install_dir, container_ci_
         )
         docker_script.comment()
 
-        cachefrommap = [
-            "tritonserver_buildbase",
-            "tritonserver_buildbase_cache0",
-            "tritonserver_buildbase_cache1",
-        ]
+        cachefrommap = FLAGS.cache_from_map
 
         baseargs = [
             "docker",
@@ -2385,6 +2381,13 @@ if __name__ == "__main__":
         action="store_true",
         required=False,
         help="Requires to split CI build into multiple builds. Will generate cmake build script separatelly for each backend",
+    )
+    parser.add_argument(
+        "--cache-from-map",
+        action="append",
+        required=False,
+        help="Requires to split CI build into multiple builds. Will generate cmake build script separatelly for each backend",
+        default = [ "tritonserver_buildbase", "tritonserver_buildbase_cache0", "tritonserver_buildbase_cache1", ],
     )
 
     FLAGS = parser.parse_args()
