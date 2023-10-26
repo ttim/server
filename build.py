@@ -1559,7 +1559,7 @@ def create_docker_build_script(script_name, container_install_dir, container_ci_
             "-w",
             "/workspace/build",
             "--name",
-            FLAGS.docker_container_name,
+            "tritonserver_builder",
         ]
 
         if not FLAGS.no_container_interactive:
@@ -1581,10 +1581,10 @@ def create_docker_build_script(script_name, container_install_dir, container_ci_
 
         # Remove existing tritonserver_builder container...
         if target_platform() == "windows":
-            docker_script.cmd(["docker", "rm", FLAGS.docker_container_name,])
+            docker_script.cmd(["docker", "rm", "tritonserver_builder"])
         else:
             docker_script._file.write(
-                'if [ "$(docker ps -a | grep ' + FLAGS.docker_container_name + ' )" ]; then  docker rm ' + FLAGS.docker_container_name + '; fi\n'
+                'if [ "$(docker ps -a | grep tritonserver_builder)" ]; then  docker rm tritonserver_builder; fi\n'
             )
 
         docker_script.cmd(runargs, check_exitcode=True)
@@ -1593,7 +1593,7 @@ def create_docker_build_script(script_name, container_install_dir, container_ci_
             [
                 "docker",
                 "cp",
-                FLAGS.docker_container_name + ":/tmp/tritonbuild/install",
+                "tritonserver_builder:/tmp/tritonbuild/install",
                 FLAGS.build_dir,
             ],
             check_exitcode=True,
@@ -1604,7 +1604,7 @@ def create_docker_build_script(script_name, container_install_dir, container_ci_
                 [
                     "docker",
                     "cp",
-                    FLAGS.docker_container_name + ":/tmp/tritonbuild/ci",
+                    "tritonserver_builder:/tmp/tritonbuild/ci",
                     FLAGS.build_dir,
                 ],
                 check_exitcode=True,
@@ -2388,12 +2388,6 @@ if __name__ == "__main__":
         required=False,
         help="Requires to split CI build into multiple builds. Will generate cmake build script separatelly for each backend",
         default = [ "tritonserver_buildbase", "tritonserver_buildbase_cache0", "tritonserver_buildbase_cache1", ],
-    )
-    parser.add_argument(
-        "--docker-container-name",
-        required=False,
-        help="Requires to split CI build into multiple builds. Will generate cmake build script separatelly for each backend",
-        default = "tritonserver_builder",
     )
 
     FLAGS = parser.parse_args()
