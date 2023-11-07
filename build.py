@@ -1586,7 +1586,7 @@ def create_docker_build_script(script_name, container_install_dir, container_ci_
             docker_script.cmd(["docker", "rm", "tritonserver_builder"])
         else:
             docker_script._file.write(
-                'if [ "$(docker ps -a | grep tritonserver_builder)" ]; then  docker rm tritonserver_builder; fi\n'
+                'if [ ! -z $( docker ps -a --filter "name=tritonserver_builder$" -q  ]; then  docker rm tritonserver_builder; fi\n'
             )
 
         docker_script.cmd(runargs, check_exitcode=True)
