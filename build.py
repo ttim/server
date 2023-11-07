@@ -1281,7 +1281,9 @@ RUN apt-get update && \
     if "vllm" in backends:
         # [DLIS-5606] Build Conda environment for vLLM backend
         # Remove Pip install once vLLM backend moves to Conda environment.
-        df += """
+        # TODO: remove condition on architecutre once the vLLM backend is supports arm64
+        if platform.machine() == "x86_64":
+            df += """
 # vLLM needed for vLLM backend
 RUN pip3 install vllm=={}
 """.format(
