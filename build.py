@@ -1329,18 +1329,16 @@ RUN apt-get update && \
     # Add dependencies needed for tensorrtllm backend
     if "tensorrtllm" in backends:
         be = "tensorrtllm"
-        for override_be in FLAGS.backend_name_override:
-            if override_be == "tensorrtllm":
-                be = FLAGS.backend_name_override["tensorrtllm"]
+        url = "https://raw.githubusercontent.com/triton-inference-server/{}_backend/{}/tools/gen_trtllm_dockerfile.py".format(
+            be, backends["tensorrtllm"]  # repo tag
+        )
 
-        if FLAGS.github_organization == "https://github.com/triton-inference-server":
-            url = "https://raw.githubusercontent.com/triton-inference-server/{}_backend/{}/tools/gen_trtllm_dockerfile.py".format(
-                be, backends["tensorrtllm"]  # repo tag
-            )
-        else:
-            url = "{}/{}_backend/-/raw/{}/tools/gen_trtllm_dockerfile.py".format(
-                FLAGS.github_organization, be, backends[be]  # repo tag
-            )
+        for override_be in FLAGS.override_backend_repo_url:
+            if override_be == "tensorrtllm":
+                url = "{}/-/raw/{}/tools/gen_trtllm_dockerfile.py".format(
+                    FLAGS.override_backend_repo_url[be], backends[be]  # repo tag
+                )
+
         response_content, content_type = fetch_content(url)
         if response_content and content_type and "text/html" not in content_type:
             spec = importlib.util.spec_from_loader(
@@ -1844,14 +1842,12 @@ def backend_build(
     cmake_script.mkdir(build_dir)
     cmake_script.cwd(build_dir)
 
-    for override_be in FLAGS.backend_name_override:
+    for override_be in FLAGS.override_backend_repo_url:
         if override_be == be:
-            # Clone the backend repo with the override name and store as the original backend name
-            cmake_script.gitclone(
-                backend_repo(FLAGS.backend_name_override[be]),
-                tag,
-                be,
-                github_organization,
+            cmake_script.cmd(
+                "git clone --recursive --depth=1 -b {} {}.git {}".format(
+                    tag, FLAGS.override_backend_repo_url[be], be
+                )
             )
     else:
         cmake_script.gitclone(backend_repo(be), tag, be, github_organization)
@@ -2462,10 +2458,10 @@ if __name__ == "__main__":
         help="Override specified backend CMake argument in the build as <backend>:<name>=<value>. The argument is passed to CMake as -D<name>=<value>. This flag only impacts CMake arguments that are used by build.py. To unconditionally add a CMake argument to the backend build use --extra-backend-cmake-arg.",
     )
     parser.add_argument(
-        "--backend-name-override",
+        "--override-backend-repo-url",
         action="append",
         required=False,
-        help="Override specified backend name in the build as <backend>:<name>. This only impacts the name of the backend when cloning the backend repo. It is still required to specify the backend to build with --backend with the original backend name.",
+        help="Override specified backend name in the build as <backend>:<url>. This only impacts when cloning the backend repo. It is still required to specify the backend to build with --backend with the original backend name.",
     )
 
     FLAGS = parser.parse_args()
@@ -2494,8 +2490,8 @@ if __name__ == "__main__":
         FLAGS.override_backend_cmake_arg = []
     if FLAGS.extra_backend_cmake_arg is None:
         FLAGS.extra_backend_cmake_arg = []
-    if FLAGS.backend_name_override is None:
-        FLAGS.backend_name_override = []
+    if FLAGS.override_backend_repo_url is None:
+        FLAGS.override_backend_repo_url = []
 
     # if --enable-all is specified, then update FLAGS to enable all
     # settings, backends, repo-agents, caches, file systems, endpoints, etc.
