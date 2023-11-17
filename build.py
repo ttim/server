@@ -1122,7 +1122,14 @@ ENV NVIDIA_TRITON_SERVER_VERSION ${TRITON_CONTAINER_VERSION}
 
 
 def create_dockerfile_linux(
-    ddir, dockerfile_name, argmap, backends, repoagents, caches, endpoints
+    ddir,
+    dockerfile_name,
+    argmap,
+    backends,
+    repoagents,
+    caches,
+    endpoints,
+    override_backend_repo_url,
 ):
     df = """
 ARG TRITON_VERSION={}
@@ -1157,7 +1164,7 @@ FROM ${BASE_IMAGE}
 """
 
     df += dockerfile_prepare_container_linux(
-        argmap, backends, FLAGS.enable_gpu, target_machine()
+        argmap, backends, FLAGS.enable_gpu, target_machine(), override_backend_repo_url
     )
 
     df += """
@@ -1188,7 +1195,9 @@ RUN patchelf --add-needed /usr/local/cuda/lib64/stubs/libcublasLt.so.12 backends
         dfile.write(df)
 
 
-def dockerfile_prepare_container_linux(argmap, backends, enable_gpu, target_machine):
+def dockerfile_prepare_container_linux(
+    argmap, backends, enable_gpu, target_machine, override_backend_repo_url
+):
     gpu_enabled = 1 if enable_gpu else 0
     # Common steps to produce docker images shared by build.py and compose.py.
     # Sets environment variables, installs dependencies and adds entrypoint
@@ -1333,10 +1342,10 @@ RUN apt-get update && \
             be, backends["tensorrtllm"]  # repo tag
         )
 
-        for override_be in FLAGS.override_backend_repo_url:
+        for override_be in override_backend_repo_url:
             if override_be == "tensorrtllm":
                 url = "{}/-/raw/{}/tools/gen_trtllm_dockerfile.py".format(
-                    FLAGS.override_backend_repo_url[be], backends[be]  # repo tag
+                    override_backend_repo_url[be], backends[be]  # repo tag
                 )
 
         response_content, content_type = fetch_content(url)
@@ -1498,7 +1507,13 @@ LABEL com.nvidia.build.ref={}
 
 
 def create_build_dockerfiles(
-    container_build_dir, images, backends, repoagents, caches, endpoints
+    container_build_dir,
+    images,
+    backends,
+    repoagents,
+    caches,
+    endpoints,
+    override_backend_repo_url,
 ):
     if "base" in images:
         base_image = images["base"]
@@ -1563,6 +1578,7 @@ def create_build_dockerfiles(
             repoagents,
             caches,
             endpoints,
+            override_backend_repo_url,
         )
 
     # Dockerfile used for the creating the CI base image.
@@ -1831,6 +1847,7 @@ def backend_build(
     images,
     components,
     library_paths,
+    override_backend_repo_url,
 ):
     repo_build_dir = os.path.join(build_dir, be, "build")
     repo_install_dir = os.path.join(build_dir, be, "install")
@@ -1842,11 +1859,11 @@ def backend_build(
     cmake_script.mkdir(build_dir)
     cmake_script.cwd(build_dir)
 
-    for override_be in FLAGS.override_backend_repo_url:
+    for override_be in override_backend_repo_url:
         if override_be == be:
             cmake_script.cmd(
                 "git clone --recursive --depth=1 -b {} {}.git {}".format(
-                    tag, FLAGS.override_backend_repo_url[be], be
+                    tag, override_backend_repo_url[be], be
                 )
             )
     else:
@@ -2627,6 +2644,16 @@ if __name__ == "__main__":
             parts[0] = "tensorflow"
         images[parts[0]] = parts[1]
 
+    # Initialize map of docker images.
+    override_backend_repo_url = {}
+    for override_be in FLAGS.override_backend_repo_url:
+        parts = override_be.split(",")
+        fail_if(
+            len(parts) != 2, "--override-backend-repo-url must specify <backend>:<url>"
+        )
+        log('override-backend-repo-url "{}": "{}"'.format(parts[0], parts[1]))
+        override_backend_repo_url[parts[0]] = parts[1]
+
     # Initialize map of library paths for each backend.
     library_paths = {}
     for lpath in FLAGS.library_paths:
@@ -2799,6 +2826,7 @@ if __name__ == "__main__":
                     images,
                     components,
                     library_paths,
+                    override_backend_repo_url,
                 )
 
         # Commands to build each repo agent...
@@ -2855,7 +2883,13 @@ if __name__ == "__main__":
             script_name += ".ps1"
 
         create_build_dockerfiles(
-            script_build_dir, images, backends, repoagents, caches, FLAGS.endpoint
+            script_build_dir,
+            images,
+            backends,
+            repoagents,
+            caches,
+            FLAGS.endpoint,
+            override_backend_repo_url,
         )
         create_docker_build_script(script_name, script_install_dir, script_ci_dir)
 
