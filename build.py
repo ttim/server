@@ -147,7 +147,7 @@ def fetch_content(url):
         return response.content, response.headers.get("Content-Type")
     except requests.exceptions.RequestException as e:
         print(f"Error fetching content from {url}: {e}")
-        return None
+        return None, None
 
 
 class BuildScript:
