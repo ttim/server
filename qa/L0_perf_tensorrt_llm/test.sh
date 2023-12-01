@@ -155,9 +155,9 @@ echo '{
   "data": [
     {
       "text_input": ["Hello, my name is"],
-      "stream": [true], 
-      "max_tokens": [16], 
-      "bad_words": [""], 
+      "stream": [true],
+      "max_tokens": [16],
+      "bad_words": [""],
       "stop_words": [""]
     }
   ]
