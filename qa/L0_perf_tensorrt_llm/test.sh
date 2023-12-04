@@ -112,7 +112,7 @@ cd $TENSORRTLLM_BACKEND_DIR && git lfs install && git submodule update --init --
 install_trt_llm
 build_base_model
 build_tensorrt_engine_inflight_batcher
-pip3 install tritonclient
+pip3 install tritonclient nvidia-ml-py3
 
 rm -rf ${MODEL_REPOSITORY} && mkdir ${MODEL_REPOSITORY}
 cp -r ${TENSORRTLLM_BACKEND_DIR}/all_models/inflight_batcher_llm/* ${MODEL_REPOSITORY}
