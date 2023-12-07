@@ -29,7 +29,8 @@ source ../common/util.sh
 RET=0
 BASE_DIR=$(pwd)
 NUM_GPUS=${NUM_GPUS:=1}
-TENSORRTLLM_BACKEND_REPO_TAG=main
+TENSORRTLLM_BACKEND_REPO_TAG=${TENSORRTLLM_BACKEND_REPO_TAG:="main"}
+TRT_ROOT="/usr/local/tensorrt"
 
 MODEL_NAME="ensemble"
 NAME="tensorrt_llm_benchmarking_test"
@@ -116,17 +117,21 @@ pip3 install tritonclient nvidia-ml-py3
 
 rm -rf ${MODEL_REPOSITORY} && mkdir ${MODEL_REPOSITORY}
 cp -r ${TENSORRTLLM_BACKEND_DIR}/all_models/inflight_batcher_llm/* ${MODEL_REPOSITORY}
+rm -rf ${MODEL_REPOSITORY}/tensorrt_llm_bls
 cp -r ${ENGINES_DIR}/* ${MODEL_REPOSITORY}/tensorrt_llm/1
 
 replace_config_tags '${triton_max_batch_size}' "128" "${MODEL_REPOSITORY}/ensemble/config.pbtxt"
 replace_config_tags '${triton_max_batch_size}' "128" "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
 replace_config_tags '${triton_max_batch_size}' "128" "${MODEL_REPOSITORY}/preprocessing/config.pbtxt"
+replace_config_tags '${preprocessing_instance_count}' '1' "${MODEL_REPOSITORY}/preprocessing/config.pbtxt"
+replace_config_tags '${postprocessing_instance_count}' '1' "${MODEL_REPOSITORY}/postprocessing/config.pbtxt"
 replace_config_tags '${triton_max_batch_size}' "128" "${MODEL_REPOSITORY}/postprocessing/config.pbtxt"
 replace_config_tags '${tokenizer_dir}' "${TOKENIZER_DIR}/" "${MODEL_REPOSITORY}/preprocessing/config.pbtxt"
 replace_config_tags '${tokenizer_dir}' "${TOKENIZER_DIR}/" "${MODEL_REPOSITORY}/postprocessing/config.pbtxt"
 replace_config_tags '${tokenizer_type}' 'auto' "${MODEL_REPOSITORY}/preprocessing/config.pbtxt"
 replace_config_tags '${tokenizer_type}' 'auto' "${MODEL_REPOSITORY}/postprocessing/config.pbtxt"
 replace_config_tags '${decoupled_mode}' 'True' "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
+replace_config_tags '${max_queue_delay_microseconds}' "1000000" "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
 replace_config_tags '${batching_strategy}' 'inflight_fused_batching' "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
 replace_config_tags '${max_queue_delay_microseconds}' "0" "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
 replace_config_tags '${engine_dir}' "${MODEL_REPOSITORY}/tensorrt_llm/1/" "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
@@ -142,7 +147,7 @@ fi
 ARCH="amd64"
 STATIC_BATCH=1
 INSTANCE_CNT=1
-CONCURRENCY=1
+CONCURRENCY=100
 MODEL_FRAMEWORK="tensorrt"
 PERF_CLIENT="perf_analyzer"
 REPORTER=../common/reporter.py
