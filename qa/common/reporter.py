@@ -31,9 +31,10 @@ import csv
 import json
 import os
 import socket
-import requests
-import numpy as np
 from itertools import pairwise
+
+import numpy as np
+import requests
 
 FLAGS = None
 
