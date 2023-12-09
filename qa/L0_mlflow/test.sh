@@ -99,6 +99,11 @@ if [ $? -ne 0 ]; then
     echo -e "\n***\n*** Expect 'triton' flavor model is logged to MLFlow\n***"
     CLI_RET=1
 fi
+
+# WAR: sleep in between publishing and deploying to see if there is a chance of
+#      model not being ready for deployment yet, and improve test consistency.
+sleep 10
+
 if [ $CLI_RET -eq 0 ]; then
     mlflow deployments create -t triton --flavor triton \
         --name onnx_float32_int32_int32 -m models:/onnx_float32_int32_int32/1 >>$CLI_LOG 2>&1
