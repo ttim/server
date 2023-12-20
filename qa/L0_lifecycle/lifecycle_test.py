@@ -41,6 +41,7 @@ import time
 import unittest
 from builtins import range
 from functools import partial
+from pathlib import Path
 
 import infer_util as iu
 import numpy as np
@@ -3253,6 +3254,83 @@ class LifeCycleTest(tu.TestResultCollector):
                         triton_client.get_model_repository_index(),
                     )
                     self.assertTrue(triton_client.is_server_ready())
+
+    def test_model_config_overwite(self):
+        model_name = "identity_fp32"
+
+        # Make sure version 1 of the model is loaded
+        try:
+            triton_client = self._get_client()
+            self.assertTrue(triton_client.is_server_live())
+            self.assertTrue(triton_client.is_server_ready())
+            self.assertTrue(triton_client.is_model_ready(model_name, "1"))
+        except Exception as ex:
+            self.assertTrue(False, "unexpected error {}".format(ex))
+
+        # Load the model from disk w/o any special configuration settings.
+        original_config = triton_client.get_model_config(model_name)
+
+        # The instance_group[0].count is set to 2 instead of the default 1.
+        # This enough of a delta to ensure the correct model configuration
+        # has been applied to the model.
+        override_config = """
+name: "identity_fp32"
+backend: "identity"
+max_batch_size: 0
+input [
+  {
+    name: "INPUT0"
+    data_type: TYPE_INT32
+    dims: [ -1 ]
+  }
+]
+output [
+  {
+    name: "OUTPUT0"
+    data_type: TYPE_INT32
+    dims: [ -1 ]
+  }
+]
+instance_group [
+  {
+    count: 2
+    kind : KIND_CPU
+  }
+]
+parameters [
+  {
+    key: "creation_delay_sec"
+    value: { string_value: "10" }
+  }
+]"""
+
+        # Ensure the model has been loaded w/ the expected (different from override) config.
+        self.assertTrue(original_config != None and original_config != override_config)
+
+        # Reload the model with the overriding configuration value.
+        triton_client.load_model(model_name, Config=override_config)
+
+        # Ensure the model has been loaded w/ the expected (override) config.
+        updated_config = triton_client.get_model_config(model_name)
+        self.assertEqual(override_config, updated_config)
+
+        # Reload the model
+        triton_client.load_model(model_name)
+
+        # Ensure the model has been loaded w/ the expected (override) config.
+        updated_config = triton_client.get_model_config(model_name)
+        self.assertEqual(override_config, updated_config)
+
+        # Touch the local config.pbtxt and reload the file to ensure the local config
+        # is preferred because it has a more recent mtime.
+        Path(model_name + "/config.pbtxt").touch()
+
+        # Reload the model
+        triton_client.load_model(model_name)
+
+        # Ensure the model has been loaded w/ the expected (local) config.
+        updated_config = triton_client.get_model_config(model_name)
+        self.assertTrue(original_config, updated_config)
 
 
 if __name__ == "__main__":

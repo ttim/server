@@ -1947,3 +1947,38 @@ else
 fi
 
 exit $RET
+
+# LifeCycleTest.test_ensemble_config_overwite
+
+rm -rf models
+mkdir models
+MODEL_NAME="identity_fp32"
+cp -r ../python_models/${MODEL_NAME} models/ && (cd models/${MODEL_NAME} && \
+    mkdir 1 && mv model.py 1 && \
+    echo "    def initialize(self, args):" >> 1/model.py && \
+    echo "        import time" >> 1/model.py && \
+    echo "        time.sleep(10)" >> 1/model.py)
+rm models/${MODEL_NAME}/config.pbtxt
+
+SERVER_ARGS="--model-repository=`pwd`/models --model-control-mode=explicit"
+SERVER_LOG="./inference_server_$LOG_IDX.log"
+run_server
+if [ "$SERVER_PID" == "0" ]; then
+    echo -e "\n***\n*** Failed to start $SERVER\n***"
+    cat $SERVER_LOG
+    exit 1
+fi
+
+set +e
+python $LC_TEST LifeCycleTest.test_ensemble_config_overwite >>$CLIENT_LOG 2>&1
+if [ $? -ne 0 ]; then
+    cat $CLIENT_LOG
+    echo -e "\n***\n*** Test Failed\n***"
+    RET=1
+fi
+set -e
+
+kill $SERVER_PID
+wait $SERVER_PID
+
+LOG_IDX=$((LOG_IDX+1))
