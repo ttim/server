@@ -80,8 +80,8 @@ def collect_gpu_metrics(data):
 
     data["l_gpus_count"] = device_count
     data["s_gpu_model"] = ", ".join(unique_gpu_models)
-    data["d_total_gpu_memory"] = total_memory / (1024**2)
-    data["d_total_free_gpu_memory"] = total_free_memory / (1024**2)
+    data["d_total_gpu_memory_mb"] = total_memory / (1024**2)
+    data["d_total_free_gpu_memory_mb"] = total_free_memory / (1024**2)
 
     pynvml.nvmlShutdown()
 
@@ -98,8 +98,8 @@ def collect_token_latencies(export_data, data):
         for prev_res, res in pairwise(responses):
             token_to_token_latencies.append((res - prev_res) / 1_000_000)
 
-    data["d_avg_token_to_token_latency"] = np.mean(token_to_token_latencies)  # msec
-    data["d_avg_first_token_latency"] = np.mean(first_token_latencies)  # msec
+    data["d_avg_token_to_token_latency_ms"] = np.mean(token_to_token_latencies)  # msec
+    data["d_avg_first_token_latency_ms"] = np.mean(first_token_latencies)  # msec
 
 
 def annotate(data):
