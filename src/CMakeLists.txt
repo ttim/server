@@ -88,7 +88,7 @@ endif()
 
 # re2
 #
-find_library(RE2_LIBRARY NAMES re2)
+find_package(re2 REQUIRED)
 
 #
 # tritonserver executable
@@ -125,7 +125,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
   target_compile_options(
     main
     PRIVATE
-      /W1 /D_WIN32_WINNT=0x0A00 /EHsc
+      /W1 /D_WIN32_WINNT=0x0A00 /EHsc /Zc:preprocessor
   )
   target_compile_definitions(main
     PRIVATE
@@ -358,7 +358,7 @@ if(${TRITON_ENABLE_HTTP}
     target_compile_options(
       http-endpoint-library
       PRIVATE
-        /W1 /D_WIN32_WINNT=0x0A00 /EHsc
+        /W1 /D_WIN32_WINNT=0x0A00 /EHsc /Zc:preprocessor
     )
   else()
     target_compile_options(
@@ -383,7 +383,7 @@ if(${TRITON_ENABLE_HTTP}
       triton-core-serverstub  # from repo-core
       ${LIBEVENT_LIBRARIES}
       libevhtp::evhtp
-      ${RE2_LIBRARY}
+      re2::re2
   )
 
   target_include_directories(
@@ -600,7 +600,7 @@ if (NOT WIN32)
     target_compile_options(
       simple
       PRIVATE
-        /W1 /D_WIN32_WINNT=0x0A00 /EHsc
+        /W1 /D_WIN32_WINNT=0x0A00 /EHsc /Zc:preprocessor
     )
   else()
     target_compile_options(
@@ -664,7 +664,7 @@ if (NOT WIN32)
     target_compile_options(
       multi_server
       PRIVATE
-        /W1 /D_WIN32_WINNT=0x0A00 /EHsc
+        /W1 /D_WIN32_WINNT=0x0A00 /EHsc /Zc:preprocessor
     )
   else()
     target_compile_options(
@@ -729,7 +729,7 @@ if (NOT WIN32)
       target_compile_options(
         memory_alloc
         PRIVATE
-          /W1 /D_WIN32_WINNT=0x0A00 /EHsc
+          /W1 /D_WIN32_WINNT=0x0A00 /EHsc /Zc:preprocessor
       )
     else()
       target_compile_options(
@@ -774,7 +774,5 @@ endif() # NOT WIN32
 
 # Currently unit tests do not build for windows...
 if ( NOT WIN32)
-  if ( NOT EXISTS "/etc/ld.so.conf.d/nvidia-tegra.conf" )
-    add_subdirectory(test test)
-  endif()
+  add_subdirectory(test test)
 endif() # NOT WIN32

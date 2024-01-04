@@ -71,6 +71,9 @@ class GenerateEndpointTest(tu.TestResultCollector):
         r = requests.post(
             url, data=inputs if isinstance(inputs, str) else json.dumps(inputs)
         )
+        # Content-Type header should always be JSON for errors
+        self.assertEqual(r.headers["Content-Type"], "application/json")
+
         try:
             r.raise_for_status()
             self.assertTrue(False, f"Expected failure, success for {inputs}")
@@ -79,6 +82,9 @@ class GenerateEndpointTest(tu.TestResultCollector):
 
     def generate_stream_expect_failure(self, model_name, inputs, msg):
         r = self.generate_stream(model_name, inputs)
+        # Content-Type header should always be JSON for errors
+        self.assertEqual(r.headers["Content-Type"], "application/json")
+
         try:
             r.raise_for_status()
             self.assertTrue(False, f"Expected failure, success for {inputs}")
@@ -95,7 +101,9 @@ class GenerateEndpointTest(tu.TestResultCollector):
     def check_sse_responses(self, res, expected_res):
         # Validate SSE format
         self.assertIn("Content-Type", res.headers)
-        self.assertIn("text/event-stream", res.headers["Content-Type"])
+        self.assertEqual(
+            "text/event-stream; charset=utf-8", res.headers["Content-Type"]
+        )
 
         # SSE format (data: []) is hard to parse, use helper library for simplicity
         client = sseclient.SSEClient(res)
@@ -107,7 +115,7 @@ class GenerateEndpointTest(tu.TestResultCollector):
                 self.assertIn(key, data)
                 self.assertEqual(value, data[key])
             res_count += 1
-        self.assertTrue(len(expected_res), res_count)
+        self.assertEqual(len(expected_res), res_count)
         # Make sure there is no message in the wrong form
         for remaining in client._read():
             self.assertTrue(
@@ -128,7 +136,7 @@ class GenerateEndpointTest(tu.TestResultCollector):
         r.raise_for_status()
 
         self.assertIn("Content-Type", r.headers)
-        self.assertIn("application/json", r.headers["Content-Type"])
+        self.assertEqual(r.headers["Content-Type"], "application/json")
 
         data = r.json()
         self.assertIn("TEXT", data)
@@ -355,6 +363,18 @@ class GenerateEndpointTest(tu.TestResultCollector):
             self.assertIn(
                 "attempt to access JSON non-string as string", r.json()["error"]
             )
+
+    def test_close_connection_during_streaming(self):
+        # verify the responses are streamed as soon as it is generated
+        text = "hello world"
+        rep_count = 3
+        inputs = {"PROMPT": [text], "STREAM": True, "REPETITION": rep_count, "DELAY": 2}
+        res = self.generate_stream(self._model_name, inputs, stream=True)
+        # close connection while the responses are being generated
+        res.close()
+        # check server healthiness
+        health_url = "http://localhost:8000/v2/health/live"
+        requests.get(health_url).raise_for_status()
 
     def test_parameters(self):
         # Test reserved nested object for parameters

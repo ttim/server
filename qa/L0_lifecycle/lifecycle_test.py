@@ -30,8 +30,10 @@ import sys
 
 sys.path.append("../common")
 
+import base64
 import concurrent.futures
 import json
+import multiprocessing
 import os
 import shutil
 import signal
@@ -2554,6 +2556,83 @@ class LifeCycleTest(tu.TestResultCollector):
                     model_shape,
                 )
 
+    # Test that model load API file override can't be used to create files
+    # outside of any model directory.
+    def test_file_override_security(self):
+        # When using model load API, temporary model directories are created in
+        # a randomly generated /tmp/folderXXXXXX directory for the life of the
+        # model, and cleaned up on model unload.
+        model_basepath = "/tmp/folderXXXXXX"
+        if os.path.exists(model_basepath) and os.path.isdir(model_basepath):
+            shutil.rmtree(model_basepath)
+        os.makedirs(model_basepath)
+
+        # Set file override paths that try to escape out of model directory,
+        # and test both pre-existing and non-existent files.
+        root_home_dir = "/root"
+
+        # Relative paths
+        escape_dir_rel = os.path.join("..", "..", "root")
+        escape_dir_full = os.path.join(model_basepath, escape_dir_rel)
+        self.assertEqual(os.path.abspath(escape_dir_full), root_home_dir)
+
+        new_file_rel = os.path.join(escape_dir_rel, "new_dir", "test.txt")
+        self.assertFalse(os.path.exists(os.path.join(model_basepath, new_file_rel)))
+        existing_file_rel = os.path.join(escape_dir_rel, ".bashrc")
+        self.assertTrue(os.path.exists(os.path.join(model_basepath, existing_file_rel)))
+
+        # Symlinks
+        ## No easy way to inject symlink into generated temp model dir, so for
+        ## testing sake, make a fixed symlink path in /tmp.
+        escape_dir_symlink_rel = os.path.join("..", "escape_symlink")
+        escape_dir_symlink_full = "/tmp/escape_symlink"
+        self.assertEqual(
+            os.path.abspath(os.path.join(model_basepath, escape_dir_symlink_rel)),
+            escape_dir_symlink_full,
+        )
+        if os.path.exists(escape_dir_symlink_full):
+            os.unlink(escape_dir_symlink_full)
+        os.symlink(root_home_dir, escape_dir_symlink_full)
+        self.assertTrue(os.path.abspath(escape_dir_symlink_full), root_home_dir)
+
+        symlink_new_file_rel = os.path.join(
+            escape_dir_symlink_rel, "new_dir", "test.txt"
+        )
+        self.assertFalse(
+            os.path.exists(os.path.join(model_basepath, symlink_new_file_rel))
+        )
+        symlink_existing_file_rel = os.path.join(escape_dir_symlink_rel, ".bashrc")
+        self.assertTrue(
+            os.path.exists(os.path.join(model_basepath, symlink_existing_file_rel))
+        )
+
+        # Contents to try writing to file, though it should fail to be written
+        new_contents = "This shouldn't exist"
+        new_contents_b64 = base64.b64encode(new_contents.encode())
+
+        new_files = [new_file_rel, symlink_new_file_rel]
+        existing_files = [existing_file_rel, symlink_existing_file_rel]
+        all_files = new_files + existing_files
+        for filepath in all_files:
+            # minimal config to create a new model
+            config = json.dumps({"backend": "identity"})
+            files = {f"file:{filepath}": new_contents_b64}
+            with httpclient.InferenceServerClient("localhost:8000") as client:
+                with self.assertRaisesRegex(InferenceServerException, "failed to load"):
+                    client.load_model("new_model", config=config, files=files)
+
+        for rel_path in new_files:
+            # Assert new file wasn't created
+            self.assertFalse(os.path.exists(os.path.join(model_basepath, rel_path)))
+
+        for rel_path in existing_files:
+            # Read the existing file and make sure it's contents weren't overwritten
+            existing_file = os.path.join(model_basepath, rel_path)
+            self.assertTrue(os.path.exists(existing_file))
+            with open(existing_file) as f:
+                contents = f.read()
+                self.assertNotEqual(contents, new_contents)
+
     def test_shutdown_dynamic(self):
         model_shape = (1, 1)
         input_data = np.ones(shape=(1, 1), dtype=np.float32)
@@ -2917,9 +2996,19 @@ class LifeCycleTest(tu.TestResultCollector):
             for model_name in model_names:
                 self.assertEqual(is_load, triton_client.is_model_ready(model_name))
 
+    # TODO: Consider revisiting this test
+    # The goal of this test is only to ensure the server does not crash when
+    # bombarded with concurrent load/unload requests for the same model.
+    # Some clean-up:
+    # 1. Improve core logic so all load/unload requests will always success, so
+    #    'load_fail_reasons' and 'unload_fail_reasons' can be removed.
+    # 2. Is it still necessary to track the ability to replicate a load while
+    #    async unloading?
+    # 3. What is the ideal number of threads and iterations, across different
+    #    machines, that the server is sufficiently stressed?
     def test_concurrent_same_model_load_unload_stress(self):
         model_name = "identity_zero_1_int32"
-        num_threads = 16
+        num_threads = 32
         num_iterations = 1024
         try:
             triton_client = grpcclient.InferenceServerClient(
@@ -2951,7 +3040,7 @@ class LifeCycleTest(tu.TestResultCollector):
                 try:
                     triton_client.load_model(model_name)
                 except InferenceServerException as ex:
-                    # Acceptable for an unload to happen after a load completes, but
+                    # Acceptable for an unload to happen after a load completes, only
                     # before the load can verify its load state.
                     error_message = ex.message()
                     self.assertIn(error_message, load_fail_messages)
@@ -2961,7 +3050,8 @@ class LifeCycleTest(tu.TestResultCollector):
                 try:
                     triton_client.unload_model(model_name)
                 except InferenceServerException as ex:
-                    # Acceptable for a load to happen during an async unload
+                    # Acceptable for a load to happen after an unload completes, only
+                    # before the unload can verify its unload state.
                     error_message = ex.message()
                     self.assertIn(error_message, unload_fail_messages)
                     if error_message not in exception_stats:
@@ -2983,10 +3073,16 @@ class LifeCycleTest(tu.TestResultCollector):
 
         self.assertTrue(triton_client.is_server_live())
         self.assertTrue(triton_client.is_server_ready())
-        self.assertTrue(
-            load_before_unload_finish[0],
-            "The test case did not replicate a load while async unloading. Consider increase concurrency.",
-        )
+
+        # This test can replicate a load while async unloading on machines with
+        # sufficient concurrency. Regardless on whether it is replicated or not,
+        # the server must not crash.
+        if load_before_unload_finish[0] == False:
+            # Track non-replication on test printout via statistics.
+            warning_msg = "Cannot replicate a load while async unloading. CPU count: {}. num_threads: {}.".format(
+                multiprocessing.cpu_count(), num_threads
+            )
+            global_exception_stats[warning_msg] = 1
 
         stats_path = "./test_concurrent_same_model_load_unload_stress.statistics.log"
         with open(stats_path, mode="w", encoding="utf-8") as f:

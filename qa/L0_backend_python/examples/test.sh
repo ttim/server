@@ -38,10 +38,11 @@ RET=0
 rm -fr *.log python_backend/
 
 # Install torch
-# Skip torch and torchvision install on Jetson since it is already installed.
+pip3 uninstall -y torch
 if [ "$TEST_JETSON" == "0" ]; then
-    pip3 uninstall -y torch
     pip3 install torch==2.0.0+cu117 -f https://download.pytorch.org/whl/torch_stable.html torchvision==0.15.0+cu117
+else
+    pip3 install torch==2.0.0 -f https://download.pytorch.org/whl/torch_stable.html torchvision==0.15.0
 fi
 
 # Install `validators` for Model Instance Kind example
@@ -449,7 +450,5 @@ if [ $RET -eq 0 ]; then
 else
     echo -e "\n***\n*** Example verification test FAILED.\n***"
 fi
-
-collect_artifacts_from_subdir
 
 exit $RET

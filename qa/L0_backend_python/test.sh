@@ -147,10 +147,10 @@ mkdir -p models/dlpack_identity/1/
 cp ../python_models/dlpack_identity/model.py ./models/dlpack_identity/1/
 cp ../python_models/dlpack_identity/config.pbtxt ./models/dlpack_identity
 
-# Skip torch install on Jetson since it is already installed.
 if [ "$TEST_JETSON" == "0" ]; then
   pip3 install torch==1.13.0+cpu -f https://download.pytorch.org/whl/torch_stable.html
 else
+  pip3 install torch==1.13.0 -f https://download.pytorch.org/whl/torch_stable.html
   # GPU tensor tests are disabled on jetson
   EXPECTED_NUM_TESTS=9
 fi
@@ -395,7 +395,7 @@ fi
 # Disable variants test for Jetson since already built without GPU Tensor support
 # Disable decoupled test because it uses GPU tensors
 if [ "$TEST_JETSON" == "0" ]; then
-    SUBTESTS="ensemble io bls decoupled variants"
+    SUBTESTS="ensemble io bls decoupled variants python_based_backends"
     for TEST in ${SUBTESTS}; do
         # Run each subtest in a separate virtual environment to avoid conflicts
         # between dependencies.
@@ -423,7 +423,7 @@ if [ "$TEST_JETSON" == "0" ]; then
     fi
 fi
 
-SUBTESTS="lifecycle restart model_control examples argument_validation logging custom_metrics"
+SUBTESTS="lifecycle restart model_control examples argument_validation logging custom_metrics request_rescheduling"
 for TEST in ${SUBTESTS}; do
     # Run each subtest in a separate virtual environment to avoid conflicts
     # between dependencies.

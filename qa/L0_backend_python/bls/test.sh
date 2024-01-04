@@ -34,7 +34,6 @@ source ../../common/util.sh
 TRITON_DIR=${TRITON_DIR:="/opt/tritonserver"}
 SERVER=${TRITON_DIR}/bin/tritonserver
 BACKEND_DIR=${TRITON_DIR}/backends
-SERVER_ARGS="--model-repository=`pwd`/models --backend-directory=${BACKEND_DIR} --log-verbose=1"
 
 RET=0
 rm -fr *.log ./models *.txt
@@ -101,47 +100,54 @@ cp -r ${DATADIR}/qa_model_repository/libtorch_nobatch_float32_float32_float32/ .
     sed -i 's/libtorch_nobatch_float32_float32_float32/libtorch_cpu/' models/libtorch_cpu/config.pbtxt && \
     echo "instance_group [ { kind: KIND_CPU} ]" >> models/libtorch_cpu/config.pbtxt
 
-for TRIAL in non_decoupled decoupled ; do
-    for MODEL_NAME in bls bls_memory bls_memory_async bls_async; do
-        export MODEL_NAME=${MODEL_NAME}
-        export BLS_KIND=${TRIAL}
-        SERVER_LOG="./${MODEL_NAME}_${TRIAL}.inference_server.log"
+# Test with different sizes of CUDA memory pool
+for CUDA_MEMORY_POOL_SIZE_MB in 64 128 ; do
 
-        run_server
-        if [ "$SERVER_PID" == "0" ]; then
-            echo -e "\n***\n*** Failed to start $SERVER for ${MODEL_NAME} ${TRIAL}\n***"
-            cat $SERVER_LOG
-            # Mark failure, but continue so logs can be collected at the end
-            RET=1
-            continue
-        fi
+    CUDA_MEMORY_POOL_SIZE_BYTES=$((CUDA_MEMORY_POOL_SIZE_MB * 1024 * 1024))
+    SERVER_ARGS="--model-repository=`pwd`/models --backend-directory=${BACKEND_DIR} --log-verbose=1 --cuda-memory-pool-byte-size=0:${CUDA_MEMORY_POOL_SIZE_BYTES}"
 
-        set +e
+    for TRIAL in non_decoupled decoupled ; do
+        for MODEL_NAME in bls bls_memory bls_memory_async bls_async; do
+            export MODEL_NAME=${MODEL_NAME}
+            export BLS_KIND=${TRIAL}
 
-        # FIXME: Seeing intermittent shm leak for bls decoupled:
-        # [bls decoupled] Shared memory leak detected: 129980848 (current) > 129980800 (prev).
-        python3 $CLIENT_PY >> $CLIENT_LOG 2>&1
-        if [ $? -ne 0 ]; then
-            echo -e "\n***\n*** ${MODEL_NAME} ${BLS_KIND} test FAILED. \n***"
-            cat $SERVER_LOG
-            cat $CLIENT_LOG
-            RET=1
-        else
-            check_test_results $TEST_RESULT_FILE $EXPECTED_NUM_TESTS
+            SERVER_LOG="./${MODEL_NAME}_${TRIAL}.${CUDA_MEMORY_POOL_SIZE_MB}.inference_server.log"
+            run_server
+            if [ "$SERVER_PID" == "0" ]; then
+                echo -e "\n***\n*** Failed to start $SERVER for ${MODEL_NAME} ${TRIAL}\n***"
+                cat $SERVER_LOG
+                # Mark failure, but continue so logs can be collected at the end
+                RET=1
+                continue
+            fi
+
+            set +e
+
+            # FIXME: Seeing intermittent shm leak for bls decoupled:
+            # [bls decoupled] Shared memory leak detected: 129980848 (current) > 129980800 (prev).
+            python3 $CLIENT_PY >> $CLIENT_LOG 2>&1
             if [ $? -ne 0 ]; then
+                echo -e "\n***\n*** ${MODEL_NAME} ${BLS_KIND} test FAILED. \n***"
                 cat $SERVER_LOG
                 cat $CLIENT_LOG
-                echo -e "\n***\n*** Test Result Verification Failed for ${MODEL_NAME} ${BLS_KIND}\n***"
                 RET=1
+            else
+                check_test_results $TEST_RESULT_FILE $EXPECTED_NUM_TESTS
+                if [ $? -ne 0 ]; then
+                    cat $SERVER_LOG
+                    cat $CLIENT_LOG
+                    echo -e "\n***\n*** Test Result Verification Failed for ${MODEL_NAME} ${BLS_KIND}\n***"
+                    RET=1
+                fi
             fi
-        fi
 
-        set -e
+            set -e
 
-        kill $SERVER_PID
-        wait $SERVER_PID
-        # Give time for python processes to properly clean up
-        sleep 30
+            kill $SERVER_PID
+            wait $SERVER_PID
+
+            # Give time for python processes to properly clean up
+            sleep 30
     done
 done
 
@@ -316,12 +322,38 @@ else
     fi
 fi
 
+# Test BLS parameters
+rm -rf params_models && mkdir -p params_models/bls_parameters/1
+cp ../../python_models/bls_parameters/model.py ./params_models/bls_parameters/1
+cp ../../python_models/bls_parameters/config.pbtxt ./params_models/bls_parameters
+
+TEST_LOG="./bls_parameters.log"
+SERVER_LOG="./bls_parameters.server.log"
+
+SERVER_ARGS="--model-repository=`pwd`/params_models --backend-directory=${BACKEND_DIR} --log-verbose=1"
+run_server
+if [ "$SERVER_PID" == "0" ]; then
+    echo -e "\n***\n*** Failed to start $SERVER\n***"
+    cat $SERVER_LOG
+    exit 1
+fi
+
+set +e
+python3 bls_parameters_test.py > $TEST_LOG 2>&1
+if [ $? -ne 0 ]; then
+    echo -e "\n***\n*** bls_parameters_test.py FAILED. \n***"
+    cat $TEST_LOG
+    RET=1
+fi
+set -e
+
+kill $SERVER_PID
+wait $SERVER_PID
+
 if [ $RET -eq 1 ]; then
     echo -e "\n***\n*** BLS test FAILED. \n***"
 else
     echo -e "\n***\n*** BLS test PASSED. \n***"
 fi
-
-collect_artifacts_from_subdir
 
 exit $RET

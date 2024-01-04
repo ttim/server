@@ -59,29 +59,53 @@ class PythonUnittest(tu.TestResultCollector):
         model_name = os.environ["MODEL_NAME"]
         bls_kind = os.environ.get("BLS_KIND", "non_decoupled")
 
-        # Stress test memory growth test more on nightly runs
-        nightly = int(os.environ.get("TRITON_NIGHTLY", "0"))
-        repetitions = 5 if nightly else 1
-
-        # FIXME: small leak for decoupled bls still? Appears intermittent, should root cause.
-        # [bls decoupled] Shared memory leak detected: 129980784 (current) > 129980752 (prev).
-        if model_name == "bls" and bls_kind == "decoupled":
-            self._run_unittest(model_name)
-        # FIXME: big leak - probably intended growth for this test, should investigate.
-        # TODO: Why does decoupled version not leak? Does non-decoupled increase
-        # buffer enough to pass on decoupled trial?
-        # [bls_memory_async non_decoupled] Shared memory leak detected: 422534608 (current) > 212817728 (prev).
-        elif model_name == "bls_memory_async" and bls_kind == "non_decoupled":
+        if bls_kind == "decoupled":
+            # Skip the shared memory probe for decoupled models for now as
+            # there are some small changes in the shared memory usage when
+            # running decoupled inferences. Confirmed that the memory growth
+            # is bounded.
             self._run_unittest(model_name)
         else:
-            # Warmup run, let it do any upfront shm initializations required
-            self._run_unittest(model_name)
+            if (
+                model_name == "bls"
+                or model_name == "bls_memory"
+                or model_name == "bls_memory_async"
+                or model_name == "bls_request_rescheduling"
+            ):
+                # For these tests, the memory region size will be grown. Because of
+                # this we need to use the shared memory probe only on the later
+                # call so that the probe can detect the leak correctly.
+                self._run_unittest(model_name)
 
-            debug_str = f"{model_name} {bls_kind}"
-            with self._shm_leak_detector.Probe(debug_str=debug_str) as shm_probe:
-                for i in range(repetitions):
-                    print(f"[{debug_str}] Test iteration: {i}")
+                with self._shm_leak_detector.Probe() as shm_probe:
                     self._run_unittest(model_name)
+            else:
+                with self._shm_leak_detector.Probe() as shm_probe:
+                    self._run_unittest(model_name)
+
+        ## Stress test memory growth test more on nightly runs
+        #nightly = int(os.environ.get("TRITON_NIGHTLY", "0"))
+        #repetitions = 5 if nightly else 1
+        #
+        ## FIXME: small leak for decoupled bls still? Appears intermittent, should root cause.
+        ## [bls decoupled] Shared memory leak detected: 129980784 (current) > 129980752 (prev).
+        #if model_name == "bls" and bls_kind == "decoupled":
+        #    self._run_unittest(model_name)
+        ## FIXME: big leak - probably intended growth for this test, should investigate.
+        ## TODO: Why does decoupled version not leak? Does non-decoupled increase
+        ## buffer enough to pass on decoupled trial?
+        ## [bls_memory_async non_decoupled] Shared memory leak detected: 422534608 (current) > 212817728 (prev).
+        #elif model_name == "bls_memory_async" and bls_kind == "non_decoupled":
+        #    self._run_unittest(model_name)
+        #else:
+        #    # Warmup run, let it do any upfront shm initializations required
+        #    self._run_unittest(model_name)
+        #
+        #    debug_str = f"{model_name} {bls_kind}"
+        #    with self._shm_leak_detector.Probe(debug_str=debug_str) as shm_probe:
+        #        for i in range(repetitions):
+        #            print(f"[{debug_str}] Test iteration: {i}")
+        #            self._run_unittest(model_name)
 
 
 if __name__ == "__main__":

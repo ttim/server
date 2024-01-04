@@ -88,6 +88,17 @@ class Barrier {
   size_t generation_;
 };
 
+// Simple structure that carries the userp payload needed for
+// request release callback.
+struct RequestReleasePayload final {
+  explicit RequestReleasePayload(
+      const std::shared_ptr<TRITONSERVER_InferenceRequest>& inference_request)
+      : inference_request_(inference_request){};
+
+ private:
+  std::shared_ptr<TRITONSERVER_InferenceRequest> inference_request_ = nullptr;
+};
+
 //
 // ResponseQueue
 //
@@ -640,9 +651,9 @@ class InferHandlerState {
 
     void GrpcContextAsyncNotifyWhenDone(InferHandlerStateType* state)
     {
-      InferHandlerStateType* wrapped_state =
-          new InferHandlerStateType(Steps::WAITING_NOTIFICATION, state);
-      ctx_->AsyncNotifyWhenDone(wrapped_state);
+      notify_state_ = std::unique_ptr<InferHandlerStateType>(
+          new InferHandlerStateType(Steps::WAITING_NOTIFICATION, state));
+      ctx_->AsyncNotifyWhenDone(notify_state_.get());
     }
 
     void SetReceivedNotification(bool value) { received_notification_ = true; }
@@ -666,8 +677,12 @@ class InferHandlerState {
       all_states_.insert(state);
     }
 
-    // Adds the state object created on this context
-    void EraseState(InferHandlerStateType* state) { all_states_.erase(state); }
+    // Erases the state object created on this context
+    void EraseState(InferHandlerStateType* state)
+    {
+      EraseInflightState(state);
+      all_states_.erase(state);
+    }
 
     bool HandleCompletion()
     {
@@ -711,15 +726,9 @@ class InferHandlerState {
     // Inserts the state to a set tracking active requests
     // within the server core. Should only be called when
     // the request was successfully enqueued on Triton.
-    void InsertInflightState(
-        InferHandlerStateType* state, TRITONSERVER_InferenceRequest* irequest)
+    void InsertInflightState(InferHandlerStateType* state)
     {
       std::lock_guard<std::recursive_mutex> lock(mu_);
-      // The irequest_ptr_ will get populated when it is
-      // marked as active which means the request has been
-      // successfully enqueued to Triton core using
-      // TRITONSERVER_ServerInferAsync.
-      state->irequest_ptr_ = irequest;
       inflight_states_.insert(state);
     }
 
@@ -744,7 +753,7 @@ class InferHandlerState {
           if (state->step_ != Steps::CANCELLED &&
               state->step_ != Steps::COMPLETE) {
             LOG_VERBOSE(1) << "Issuing cancellation for " << state->unique_id_;
-            if (state->irequest_ptr_ == nullptr) {
+            if (state->inference_request_.get() == nullptr) {
               // The context might be holding some states that have
               // not been issued to Triton core. Need to skip calling
               // issuing cancellation for such requests.
@@ -754,7 +763,8 @@ class InferHandlerState {
             // Assuming if RequestComplete callback is run asynchronously
             // before this point.
             TRITONSERVER_Error* err = nullptr;
-            err = TRITONSERVER_InferenceRequestCancel(state->irequest_ptr_);
+            err = TRITONSERVER_InferenceRequestCancel(
+                state->inference_request_.get());
             // TODO: Add request id to the message
             if (err != nullptr) {
               LOG_INFO << "Failed to cancel the request: "
@@ -975,6 +985,10 @@ class InferHandlerState {
     // True if there is an ongoing write to the grpc stream
     std::atomic<bool> ongoing_write_;
 
+    // The state object that is sent to grpc async notification
+    // for tracking the gRPC stream.
+    std::unique_ptr<InferHandlerState> notify_state_;
+
     // Tracks whether the async notification has been delivered by
     // completion queue.
     bool received_notification_;
@@ -1015,7 +1029,6 @@ class InferHandlerState {
     unique_id_ = NEXT_UNIQUE_ID;
     context_ = context;
     step_ = start_step;
-    irequest_ptr_ = nullptr;
     cb_count_ = 0;
     is_decoupled_ = false;
     complete_ = false;
@@ -1034,6 +1047,7 @@ class InferHandlerState {
   void Release()
   {
     context_ = nullptr;
+    inference_request_.reset();
     ClearTraceTimestamps();
   }
 
@@ -1069,7 +1083,10 @@ class InferHandlerState {
   Steps step_;
   std::recursive_mutex step_mtx_;
 
-  TRITONSERVER_InferenceRequest* irequest_ptr_;
+  // Shared pointer to the inference request object. The lifetime of
+  // inference request object is extended till all the responses from
+  // the request are processed and the request is released.
+  std::shared_ptr<TRITONSERVER_InferenceRequest> inference_request_;
 
 #ifdef TRITON_ENABLE_TRACING
   std::shared_ptr<TraceManager::Trace> trace_;
@@ -1274,7 +1291,6 @@ InferHandler<
         state->context_->SetReceivedNotification(true);
         LOG_VERBOSE(1) << "Received notification for " << Name() << ", "
                        << state->unique_id_;
-        delete state_wrapper;
       }
       LOG_VERBOSE(2) << "Grpc::CQ::Next() "
                      << state->context_->DebugString(state);

@@ -62,15 +62,15 @@ namespace triton { namespace server {
     }                                           \
   } while (false)
 
-#define RETURN_AND_RESPOND_IF_ERR(REQ, X)             \
-  do {                                                \
-    TRITONSERVER_Error* err__ = (X);                  \
-    if (err__ != nullptr) {                           \
-      EVBufferAddErrorJson((REQ)->buffer_out, err__); \
-      evhtp_send_reply((REQ), EVHTP_RES_BADREQ);      \
-      TRITONSERVER_ErrorDelete(err__);                \
-      return;                                         \
-    }                                                 \
+#define RETURN_AND_RESPOND_IF_ERR(REQ, X)                \
+  do {                                                   \
+    TRITONSERVER_Error* err__ = (X);                     \
+    if (err__ != nullptr) {                              \
+      EVBufferAddErrorJson((REQ)->buffer_out, err__);    \
+      evhtp_send_reply((REQ), HttpCodeFromError(err__)); \
+      TRITONSERVER_ErrorDelete(err__);                   \
+      return;                                            \
+    }                                                    \
   } while (false)
 
 #define RETURN_AND_RESPOND_WITH_ERR(REQ, CODE, MSG) \
@@ -80,7 +80,46 @@ namespace triton { namespace server {
     return;                                         \
   } while (false)
 
+#define RETURN_AND_RESPOND_IF_RESTRICTED(                               \
+    REQ, RESTRICTED_CATEGORY, RESTRICTED_APIS)                          \
+  do {                                                                  \
+    auto const& is_restricted_api =                                     \
+        RESTRICTED_APIS.IsRestricted(RESTRICTED_CATEGORY);              \
+    auto const& restriction = RESTRICTED_APIS.Get(RESTRICTED_CATEGORY); \
+    if (is_restricted_api && RespondIfRestricted(REQ, restriction)) {   \
+      return;                                                           \
+    }                                                                   \
+  } while (false)
+
+
 namespace {
+
+int
+HttpCodeFromError(TRITONSERVER_Error* error)
+{
+  if (error == nullptr) {
+    return EVHTP_RES_OK;
+  }
+  switch (TRITONSERVER_ErrorCode(error)) {
+    case TRITONSERVER_ERROR_INTERNAL:
+      return EVHTP_RES_SERVERR;
+    case TRITONSERVER_ERROR_NOT_FOUND:
+      return EVHTP_RES_NOTFOUND;
+    case TRITONSERVER_ERROR_UNAVAILABLE:
+      return EVHTP_RES_SERVUNAVAIL;
+    case TRITONSERVER_ERROR_UNSUPPORTED:
+      return EVHTP_RES_NOTIMPL;
+    // cases that has no direct matching code
+    case TRITONSERVER_ERROR_UNKNOWN:
+    case TRITONSERVER_ERROR_INVALID_ARG:
+    case TRITONSERVER_ERROR_ALREADY_EXISTS:
+    case TRITONSERVER_ERROR_CANCELLED:
+      return EVHTP_RES_BADREQ;
+  }
+
+  return EVHTP_RES_BADREQ;
+}
+
 void
 EVBufferAddErrorJson(evbuffer* buffer, const char* message)
 {
@@ -104,6 +143,13 @@ EVBufferAddErrorJson(evbuffer* buffer, TRITONSERVER_Error* err)
 void
 AddContentTypeHeader(evhtp_request_t* req, const char* type)
 {
+  // Remove existing header if found
+  auto content_header =
+      evhtp_headers_find_header(req->headers_out, kContentTypeHeader);
+  if (content_header) {
+    evhtp_header_rm_and_free(req->headers_out, content_header);
+  }
+
   evhtp_headers_add_header(
       req->headers_out, evhtp_header_new(kContentTypeHeader, type, 1, 1));
 }
@@ -229,7 +275,6 @@ HTTPMetricsServer::Handle(evhtp_request_t* req)
         req, EVHTP_RES_METHNALLOWED, "Method Not Allowed");
   }
 
-  evhtp_res res = EVHTP_RES_BADREQ;
   evhtp_headers_add_header(
       req->headers_out,
       evhtp_header_new(kContentTypeHeader, "text/plain; charset=utf-8", 1, 1));
@@ -245,16 +290,16 @@ HTTPMetricsServer::Handle(evhtp_request_t* req)
       err = TRITONSERVER_MetricsFormatted(
           metrics, TRITONSERVER_METRIC_PROMETHEUS, &base, &byte_size);
       if (err == nullptr) {
-        res = EVHTP_RES_OK;
         evbuffer_add(req->buffer_out, base, byte_size);
       }
     }
 
     TRITONSERVER_MetricsDelete(metrics);
+    RETURN_AND_RESPOND_IF_ERR(req, err);
     TRITONSERVER_ErrorDelete(err);
   }
 
-  evhtp_send_reply(req, res);
+  evhtp_send_reply(req, EVHTP_RES_OK);
 }
 
 TRITONSERVER_Error*
@@ -1038,7 +1083,8 @@ HTTPAPIServer::HTTPAPIServer(
     triton::server::TraceManager* trace_manager,
     const std::shared_ptr<SharedMemoryManager>& shm_manager, const int32_t port,
     const bool reuse_port, const std::string& address,
-    const std::string& header_forward_pattern, const int thread_cnt)
+    const std::string& header_forward_pattern, const int thread_cnt,
+    const RestrictedFeatures& restricted_apis)
     : HTTPServer(port, reuse_port, address, header_forward_pattern, thread_cnt),
       server_(server), trace_manager_(trace_manager), shm_manager_(shm_manager),
       allocator_(nullptr), server_regex_(R"(/v2(?:/health/(live|ready))?)"),
@@ -1050,7 +1096,7 @@ HTTPAPIServer::HTTPAPIServer(
           R"(/v2/systemsharedmemory(?:/region/([^/]+))?/(status|register|unregister))"),
       cudasharedmemory_regex_(
           R"(/v2/cudasharedmemory(?:/region/([^/]+))?/(status|register|unregister))"),
-      trace_regex_(R"(/v2/trace/setting)")
+      trace_regex_(R"(/v2/trace/setting)"), restricted_apis_(restricted_apis)
 {
   // FIXME, don't cache server metadata. The http endpoint should
   // not be deciding that server metadata will not change during
@@ -1271,6 +1317,9 @@ HTTPAPIServer::InferResponseFree(
 void
 HTTPAPIServer::HandleServerHealth(evhtp_request_t* req, const std::string& kind)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::HEALTH, restricted_apis_);
+
   if (req->method != htp_method_GET) {
     RETURN_AND_RESPOND_WITH_ERR(
         req, EVHTP_RES_METHNALLOWED, "Method Not Allowed");
@@ -1285,16 +1334,17 @@ HTTPAPIServer::HandleServerHealth(evhtp_request_t* req, const std::string& kind)
     err = TRITONSERVER_ServerIsReady(server_.get(), &ready);
   }
 
-  evhtp_send_reply(
-      req, (ready && (err == nullptr)) ? EVHTP_RES_OK : EVHTP_RES_BADREQ);
-
-  TRITONSERVER_ErrorDelete(err);
+  RETURN_AND_RESPOND_IF_ERR(req, err);
+  evhtp_send_reply(req, ready ? EVHTP_RES_OK : EVHTP_RES_BADREQ);
 }
 
 void
 HTTPAPIServer::HandleRepositoryIndex(
     evhtp_request_t* req, const std::string& repository_name)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::MODEL_REPOSITORY, restricted_apis_);
+
   AddContentTypeHeader(req, "application/json");
   if (req->method != htp_method_POST) {
     RETURN_AND_RESPOND_WITH_ERR(
@@ -1362,6 +1412,9 @@ HTTPAPIServer::HandleRepositoryControl(
     evhtp_request_t* req, const std::string& repository_name,
     const std::string& model_name, const std::string& action)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::MODEL_REPOSITORY, restricted_apis_);
+
   AddContentTypeHeader(req, "application/json");
   if (req->method != htp_method_POST) {
     RETURN_AND_RESPOND_WITH_ERR(
@@ -1515,6 +1568,9 @@ HTTPAPIServer::HandleModelReady(
     evhtp_request_t* req, const std::string& model_name,
     const std::string& model_version_str)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::HEALTH, restricted_apis_);
+
   if (req->method != htp_method_GET) {
     RETURN_AND_RESPOND_WITH_ERR(
         req, EVHTP_RES_METHNALLOWED, "Method Not Allowed");
@@ -1549,7 +1605,11 @@ HTTPAPIServer::HandleModelMetadata(
     evhtp_request_t* req, const std::string& model_name,
     const std::string& model_version_str)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::METADATA, restricted_apis_);
+
   AddContentTypeHeader(req, "application/json");
+
   if (req->method != htp_method_GET) {
     RETURN_AND_RESPOND_WITH_ERR(
         req, EVHTP_RES_METHNALLOWED, "Method Not Allowed");
@@ -1618,6 +1678,9 @@ HTTPAPIServer::HandleModelConfig(
     evhtp_request_t* req, const std::string& model_name,
     const std::string& model_version_str)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::MODEL_CONFIG, restricted_apis_);
+
   AddContentTypeHeader(req, "application/json");
   if (req->method != htp_method_GET) {
     RETURN_AND_RESPOND_WITH_ERR(
@@ -1643,6 +1706,9 @@ HTTPAPIServer::HandleModelStats(
     evhtp_request_t* req, const std::string& model_name,
     const std::string& model_version_str)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::STATISTICS, restricted_apis_);
+
   AddContentTypeHeader(req, "application/json");
   if (req->method != htp_method_GET) {
     RETURN_AND_RESPOND_WITH_ERR(
@@ -1685,6 +1751,9 @@ HTTPAPIServer::HandleModelStats(
 void
 HTTPAPIServer::HandleTrace(evhtp_request_t* req, const std::string& model_name)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::TRACE, restricted_apis_);
+
   AddContentTypeHeader(req, "application/json");
   if ((req->method != htp_method_GET) && (req->method != htp_method_POST)) {
     RETURN_AND_RESPOND_WITH_ERR(
@@ -1938,6 +2007,9 @@ HTTPAPIServer::HandleTrace(evhtp_request_t* req, const std::string& model_name)
 void
 HTTPAPIServer::HandleLogging(evhtp_request_t* req)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::LOGGING, restricted_apis_);
+
   AddContentTypeHeader(req, "application/json");
   if ((req->method != htp_method_GET) && (req->method != htp_method_POST)) {
     RETURN_AND_RESPOND_WITH_ERR(
@@ -2087,6 +2159,9 @@ HTTPAPIServer::HandleLogging(evhtp_request_t* req)
 void
 HTTPAPIServer::HandleServerMetadata(evhtp_request_t* req)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::METADATA, restricted_apis_);
+
   AddContentTypeHeader(req, "application/json");
   if (req->method != htp_method_GET) {
     RETURN_AND_RESPOND_WITH_ERR(
@@ -2098,8 +2173,10 @@ HTTPAPIServer::HandleServerMetadata(evhtp_request_t* req)
         req->buffer_out, server_metadata_.c_str(), server_metadata_.size());
     evhtp_send_reply(req, EVHTP_RES_OK);
   } else {
+    // Not using RETURN_AND_RESPOND_IF_ERR macro as the Triton error can
+    // be persistent, the macro will clean up the error object.
     EVBufferAddErrorJson(req->buffer_out, server_metadata_err_);
-    evhtp_send_reply(req, EVHTP_RES_BADREQ);
+    evhtp_send_reply(req, HttpCodeFromError(server_metadata_err_));
   }
 }
 
@@ -2108,6 +2185,9 @@ HTTPAPIServer::HandleSystemSharedMemory(
     evhtp_request_t* req, const std::string& region_name,
     const std::string& action)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::SHARED_MEMORY, restricted_apis_);
+
   AddContentTypeHeader(req, "application/json");
   if ((action == "status") && (req->method != htp_method_GET)) {
     RETURN_AND_RESPOND_WITH_ERR(
@@ -2211,6 +2291,9 @@ HTTPAPIServer::HandleCudaSharedMemory(
     evhtp_request_t* req, const std::string& region_name,
     const std::string& action)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::SHARED_MEMORY, restricted_apis_);
+
   AddContentTypeHeader(req, "application/json");
   if ((action == "status") && (req->method != htp_method_GET)) {
     RETURN_AND_RESPOND_WITH_ERR(
@@ -3063,6 +3146,9 @@ HTTPAPIServer::HandleGenerate(
     evhtp_request_t* req, const std::string& model_name,
     const std::string& model_version_str, bool streaming)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::INFERENCE, restricted_apis_);
+
   AddContentTypeHeader(req, "application/json");
   if (req->method != htp_method_POST) {
     RETURN_AND_RESPOND_WITH_ERR(
@@ -3105,6 +3191,13 @@ HTTPAPIServer::HandleGenerate(
                &irequest, server_.get(), model_name.c_str(),
                requested_model_version));
 
+  std::shared_ptr<TRITONSERVER_InferenceRequest> irequest_shared = {
+      irequest, [](TRITONSERVER_InferenceRequest* request) {
+        LOG_TRITONSERVER_ERROR(
+            TRITONSERVER_InferenceRequestDelete(request),
+            "deleting HTTP/REST inference request");
+      }};
+
   // HTTP request paused when creating inference request. Resume it on exit if
   // this function returns early due to error. Otherwise resumed in callback.
   std::unique_ptr<GenerateRequestClass> generate_request;
@@ -3112,12 +3205,12 @@ HTTPAPIServer::HandleGenerate(
     generate_request.reset(new GenerateRequestClass(
         server_.get(), req, GetResponseCompressionType(req),
         generate_stream_request_schema_.get(),
-        generate_stream_response_schema_.get(), streaming, irequest));
+        generate_stream_response_schema_.get(), streaming, irequest_shared));
   } else {
     generate_request.reset(new GenerateRequestClass(
         server_.get(), req, GetResponseCompressionType(req),
         generate_request_schema_.get(), generate_response_schema_.get(),
-        streaming, irequest));
+        streaming, irequest_shared));
   }
   generate_request->trace_ = trace;
 
@@ -3140,12 +3233,9 @@ HTTPAPIServer::HandleGenerate(
 
       LOG_VERBOSE(1) << "[request id: " << request_id << "] "
                      << "Infer failed: " << TRITONSERVER_ErrorMessage(error);
-      LOG_TRITONSERVER_ERROR(
-          TRITONSERVER_InferenceRequestDelete(irequest),
-          "deleting HTTP/REST inference request");
       AddContentTypeHeader(req, "application/json");
       EVBufferAddErrorJson(req->buffer_out, error);
-      evhtp_send_reply(req, EVHTP_RES_BADREQ);
+      evhtp_send_reply(req, HttpCodeFromError(error));
       evhtp_request_resume(req);
 
 #ifdef TRITON_ENABLE_TRACING
@@ -3180,10 +3270,13 @@ HTTPAPIServer::HandleGenerate(
           input_metadata, generate_request->RequestSchema(), request),
       error_callback);
 
+  auto request_release_payload =
+      std::make_unique<RequestReleasePayload>(irequest_shared, nullptr);
   // [FIXME] decompression..
   RETURN_AND_CALLBACK_IF_ERR(
       TRITONSERVER_InferenceRequestSetReleaseCallback(
-          irequest, InferRequestClass::InferRequestComplete, nullptr),
+          irequest, InferRequestClass::InferRequestComplete,
+          request_release_payload.get()),
       error_callback);
   RETURN_AND_CALLBACK_IF_ERR(
       TRITONSERVER_InferenceRequestSetResponseCallback(
@@ -3205,6 +3298,7 @@ HTTPAPIServer::HandleGenerate(
   }
 #endif  // TRITON_ENABLE_TRACING
   generate_request.release();
+  request_release_payload.release();
 }
 
 TRITONSERVER_Error*
@@ -3314,7 +3408,7 @@ HTTPAPIServer::GenerateRequestClass::ExactMappingInput(
   auto it = input_metadata.find(name);
   if (it == input_metadata.end()) {
     RETURN_IF_ERR(SetTritonParameterFromJsonParameter(
-        name, generate_request, triton_request_));
+        name, generate_request, triton_request_.get()));
   } else {
     // Parse data type and shape
     std::string value;
@@ -3398,9 +3492,10 @@ HTTPAPIServer::GenerateRequestClass::ExactMappingInput(
         dtype == TRITONSERVER_TYPE_BYTES ? byte_size : element_cnt));
 
     RETURN_IF_ERR(TRITONSERVER_InferenceRequestAddInput(
-        triton_request_, name.c_str(), dtype, &shape_vec[0], shape_vec.size()));
+        triton_request_.get(), name.c_str(), dtype, &shape_vec[0],
+        shape_vec.size()));
     RETURN_IF_ERR(TRITONSERVER_InferenceRequestAppendInputData(
-        triton_request_, name.c_str(), &serialized[0], serialized.size(),
+        triton_request_.get(), name.c_str(), &serialized[0], serialized.size(),
         TRITONSERVER_MEMORY_CPU, 0 /* memory_type_id */));
   }
   return nullptr;  // success
@@ -3411,6 +3506,9 @@ HTTPAPIServer::HandleInfer(
     evhtp_request_t* req, const std::string& model_name,
     const std::string& model_version_str)
 {
+  RETURN_AND_RESPOND_IF_RESTRICTED(
+      req, RestrictedCategory::INFERENCE, restricted_apis_);
+
   if (req->method != htp_method_POST) {
     RETURN_AND_RESPOND_WITH_ERR(
         req, EVHTP_RES_METHNALLOWED, "Method Not Allowed");
@@ -3449,11 +3547,16 @@ HTTPAPIServer::HandleInfer(
       req, TRITONSERVER_InferenceRequestNew(
                &irequest, server_.get(), model_name.c_str(),
                requested_model_version));
-
+  std::shared_ptr<TRITONSERVER_InferenceRequest> irequest_shared(
+      irequest, [](TRITONSERVER_InferenceRequest* request) {
+        LOG_TRITONSERVER_ERROR(
+            TRITONSERVER_InferenceRequestDelete(request),
+            "deleting HTTP/REST inference request");
+      });
   // HTTP request paused when creating inference request. Resume it on exit if
   // this function returns early due to error. Otherwise resumed in callback.
   bool connection_paused = true;
-  auto infer_request = CreateInferRequest(req);
+  auto infer_request = CreateInferRequest(req, irequest_shared);
   infer_request->trace_ = trace;
 
   const char* request_id = "<id_unknown>";
@@ -3466,7 +3569,7 @@ HTTPAPIServer::HandleInfer(
                      << "Infer failed: " << TRITONSERVER_ErrorMessage(error);
       AddContentTypeHeader(req, "application/json");
       EVBufferAddErrorJson(req->buffer_out, error);
-      evhtp_send_reply(req, EVHTP_RES_BADREQ);
+      evhtp_send_reply(req, HttpCodeFromError(error));
       if (connection_paused) {
         evhtp_request_resume(req);
       }
@@ -3476,10 +3579,6 @@ HTTPAPIServer::HandleInfer(
         TraceManager::TraceRelease(trace->trace_, trace->trace_userp_);
       }
 #endif  // TRITON_ENABLE_TRACING
-
-      LOG_TRITONSERVER_ERROR(
-          TRITONSERVER_InferenceRequestDelete(irequest),
-          "deleting HTTP/REST inference request");
     }
   };
 
@@ -3501,10 +3600,12 @@ HTTPAPIServer::HandleInfer(
 
   RETURN_AND_CALLBACK_IF_ERR(ForwardHeaders(req, irequest), error_callback);
 
+  auto request_release_payload = std::make_unique<RequestReleasePayload>(
+      irequest_shared, decompressed_buffer);
   RETURN_AND_CALLBACK_IF_ERR(
       TRITONSERVER_InferenceRequestSetReleaseCallback(
           irequest, InferRequestClass::InferRequestComplete,
-          decompressed_buffer),
+          request_release_payload.get()),
       error_callback);
   RETURN_AND_CALLBACK_IF_ERR(
       TRITONSERVER_InferenceRequestSetResponseCallback(
@@ -3526,17 +3627,22 @@ HTTPAPIServer::HandleInfer(
 
   RETURN_AND_CALLBACK_IF_ERR(err, error_callback);
   infer_request.release();
+  request_release_payload.release();
 }
 
 void
-HTTPAPIServer::OKReplyCallback(evthr_t* thr, void* arg, void* shared)
+HTTPAPIServer::InferRequestClass::ReplyCallback(
+    evthr_t* thr, void* arg, void* shared)
 {
   HTTPAPIServer::InferRequestClass* infer_request =
       reinterpret_cast<HTTPAPIServer::InferRequestClass*>(arg);
 
   evhtp_request_t* request = infer_request->EvHtpRequest();
-  evhtp_send_reply(request, EVHTP_RES_OK);
-  evhtp_request_resume(request);
+
+  if (request != nullptr) {
+    evhtp_send_reply(request, infer_request->response_code_);
+    evhtp_request_resume(request);
+  }
 
 #ifdef TRITON_ENABLE_TRACING
   if (infer_request->trace_ != nullptr) {
@@ -3550,37 +3656,39 @@ HTTPAPIServer::OKReplyCallback(evthr_t* thr, void* arg, void* shared)
   delete infer_request;
 }
 
-void
-HTTPAPIServer::BADReplyCallback(evthr_t* thr, void* arg, void* shared)
+evhtp_res
+HTTPAPIServer::InferRequestClass::RequestFiniHook(
+    evhtp_request* request, void* arg)
 {
   HTTPAPIServer::InferRequestClass* infer_request =
       reinterpret_cast<HTTPAPIServer::InferRequestClass*>(arg);
-
-  evhtp_request_t* request = infer_request->EvHtpRequest();
-  evhtp_send_reply(request, EVHTP_RES_BADREQ);
-  evhtp_request_resume(request);
-
-#ifdef TRITON_ENABLE_TRACING
-  if (infer_request->trace_ != nullptr) {
-    infer_request->trace_->CaptureTimestamp(
-        "HTTP_SEND_START", request->send_start_ns);
-    infer_request->trace_->CaptureTimestamp(
-        "HTTP_SEND_END", request->send_end_ns);
+  if (infer_request->req_ != request) {
+    LOG_ERROR << "[INTERNAL] mismatched request in fini hook";
+    return EVHTP_RES_ERROR;
+  } else {
+    LOG_TRITONSERVER_ERROR(
+        TRITONSERVER_InferenceRequestCancel(
+            infer_request->triton_request_.get()),
+        "cancelling request");
+    infer_request->req_ = nullptr;
   }
-#endif  // TRITON_ENABLE_TRACING
-
-  delete infer_request;
+  return EVHTP_RES_OK;
 }
 
 HTTPAPIServer::InferRequestClass::InferRequestClass(
     TRITONSERVER_Server* server, evhtp_request_t* req,
-    DataCompressor::Type response_compression_type)
+    DataCompressor::Type response_compression_type,
+    const std::shared_ptr<TRITONSERVER_InferenceRequest>& triton_request)
     : server_(server), req_(req),
-      response_compression_type_(response_compression_type), response_count_(0)
+      response_compression_type_(response_compression_type), response_count_(0),
+      triton_request_(triton_request)
 {
   evhtp_connection_t* htpconn = evhtp_request_get_connection(req);
   thread_ = htpconn->thread;
   evhtp_request_pause(req);
+  evhtp_request_set_hook(
+      req_, evhtp_hook_on_request_fini, (evhtp_hook)(void*)RequestFiniHook,
+      reinterpret_cast<void*>(this));
 }
 
 void
@@ -3590,13 +3698,11 @@ HTTPAPIServer::InferRequestClass::InferRequestComplete(
   // FIXME need to manage the lifetime of InferRequestClass so that we
   // delete it here.
 
+  RequestReleasePayload* request_release_payload =
+      reinterpret_cast<RequestReleasePayload*>(userp);
+
   if ((flags & TRITONSERVER_REQUEST_RELEASE_ALL) != 0) {
-    if (userp != nullptr) {
-      evbuffer_free(reinterpret_cast<evbuffer*>(userp));
-    }
-    LOG_TRITONSERVER_ERROR(
-        TRITONSERVER_InferenceRequestDelete(request),
-        "deleting HTTP/REST inference request");
+    delete request_release_payload;
   }
 }
 
@@ -3611,7 +3717,7 @@ HTTPAPIServer::InferRequestClass::InferResponseComplete(
   // appropriately if connection closed or last response sent.
   //
   // But for now userp is the InferRequestClass object and the end of
-  // its life is in the OK or BAD ReplyCallback.
+  // its life is in the ReplyCallback.
 
   HTTPAPIServer::InferRequestClass* infer_request =
       reinterpret_cast<HTTPAPIServer::InferRequestClass*>(userp);
@@ -3645,13 +3751,13 @@ HTTPAPIServer::InferRequestClass::InferResponseComplete(
   }
 #endif  // TRITON_ENABLE_TRACING
 
-  if (err == nullptr) {
-    evthr_defer(infer_request->thread_, OKReplyCallback, infer_request);
-  } else {
+  if (err != nullptr) {
     EVBufferAddErrorJson(infer_request->req_->buffer_out, err);
+    infer_request->response_code_ = HttpCodeFromError(err);
     TRITONSERVER_ErrorDelete(err);
-    evthr_defer(infer_request->thread_, BADReplyCallback, infer_request);
   }
+  evthr_defer(
+      infer_request->thread_, InferRequestClass::ReplyCallback, infer_request);
 
   LOG_TRITONSERVER_ERROR(
       TRITONSERVER_InferenceResponseDelete(response),
@@ -3979,7 +4085,7 @@ HTTPAPIServer::GenerateRequestClass::InferResponseComplete(
   // appropriately if connection closed or last response sent.
   //
   // But for now userp is the InferRequestClass object and the end of
-  // its life is in the OK or BAD ReplyCallback.
+  // its life is in the ReplyCallback.
 
   auto infer_request =
       reinterpret_cast<HTTPAPIServer::GenerateRequestClass*>(userp);
@@ -3998,8 +4104,8 @@ HTTPAPIServer::GenerateRequestClass::InferResponseComplete(
   // First response starts the chunked response, the response code is set here
   // so user should check response body in case of error at later time.
   if (infer_request->IncrementResponseCount() == 0) {
-    infer_request->StartResponse(
-        (err == nullptr) ? EVHTP_RES_OK : EVHTP_RES_BADREQ);
+    infer_request->response_code_ = HttpCodeFromError(err);
+    evthr_defer(infer_request->thread_, StartResponse, infer_request);
   }
 
 #ifdef TRITON_ENABLE_TRACING
@@ -4022,15 +4128,24 @@ HTTPAPIServer::GenerateRequestClass::InferResponseComplete(
 }
 
 void
-HTTPAPIServer::GenerateRequestClass::StartResponse(evhtp_res code)
+HTTPAPIServer::GenerateRequestClass::StartResponse(
+    evthr_t* thr, void* arg, void* shared)
 {
-  if (streaming_) {
-    AddContentTypeHeader(req_, "text/event-stream; charset=utf-8");
-  } else {
-    AddContentTypeHeader(req_, "application/json");
+  auto infer_request =
+      reinterpret_cast<HTTPAPIServer::GenerateRequestClass*>(arg);
+  auto req = infer_request->EvHtpRequest();
+
+  if (req == nullptr) {
+    return;
   }
-  evhtp_send_reply_chunk_start(req_, code);
-  evhtp_request_resume(req_);
+
+  if (infer_request->streaming_) {
+    AddContentTypeHeader(req, "text/event-stream; charset=utf-8");
+  } else {
+    AddContentTypeHeader(req, "application/json");
+  }
+  evhtp_send_reply_chunk_start(req, infer_request->response_code_);
+  evhtp_request_resume(req);
 }
 
 void
@@ -4039,6 +4154,11 @@ HTTPAPIServer::GenerateRequestClass::ChunkResponseCallback(
 {
   auto infer_request =
       reinterpret_cast<HTTPAPIServer::GenerateRequestClass*>(arg);
+
+  if (infer_request->req_ == nullptr) {
+    return;
+  }
+
   infer_request->SendChunkResponse(false /* end */);
 }
 
@@ -4049,8 +4169,11 @@ HTTPAPIServer::GenerateRequestClass::EndResponseCallback(
   auto infer_request =
       reinterpret_cast<HTTPAPIServer::GenerateRequestClass*>(arg);
 
-  infer_request->SendChunkResponse(true /* end */);
-  evhtp_send_reply_chunk_end(infer_request->EvHtpRequest());
+  if (infer_request->EvHtpRequest() != nullptr) {
+    infer_request->SendChunkResponse(true /* end */);
+    evhtp_send_reply_chunk_end(infer_request->EvHtpRequest());
+  }
+
   delete infer_request;
 }
 
@@ -4487,16 +4610,35 @@ HTTPAPIServer::Create(
     const std::shared_ptr<SharedMemoryManager>& shm_manager, const int32_t port,
     const bool reuse_port, const std::string& address,
     const std::string& header_forward_pattern, const int thread_cnt,
+    const RestrictedFeatures& restricted_features,
     std::unique_ptr<HTTPServer>* http_server)
 {
   http_server->reset(new HTTPAPIServer(
       server, trace_manager, shm_manager, port, reuse_port, address,
-      header_forward_pattern, thread_cnt));
+      header_forward_pattern, thread_cnt, restricted_features));
 
   const std::string addr = address + ":" + std::to_string(port);
   LOG_INFO << "Started HTTPService at " << addr;
 
   return nullptr;
+}
+
+bool
+HTTPAPIServer::RespondIfRestricted(
+    evhtp_request_t* req, const Restriction& restriction)
+{
+  auto header = restriction.first;
+  auto expected_value = restriction.second;
+  const char* actual_value = evhtp_kv_find(req->headers_in, header.c_str());
+  if ((actual_value == nullptr) || (actual_value != expected_value)) {
+    EVBufferAddErrorJson(
+        req->buffer_out,
+        std::string("This API is restricted, expecting header '" + header + "'")
+            .c_str());
+    evhtp_send_reply(req, EVHTP_RES_FORBIDDEN);
+    return true;
+  }
+  return false;
 }
 
 }}  // namespace triton::server
