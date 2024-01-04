@@ -148,6 +148,7 @@ for CUDA_MEMORY_POOL_SIZE_MB in 64 128 ; do
 
             # Give time for python processes to properly clean up
             sleep 30
+        done
     done
 done
 
