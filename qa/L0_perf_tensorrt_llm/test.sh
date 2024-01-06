@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -25,33 +25,65 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-source ../common/util.sh
 RET=0
 BASE_DIR=$(pwd)
 NUM_GPUS=${NUM_GPUS:=1}
 TENSORRTLLM_BACKEND_REPO_TAG=${TENSORRTLLM_BACKEND_REPO_TAG:="main"}
 TRT_ROOT="/usr/local/tensorrt"
 
-MODEL_NAME="ensemble"
+MODEL_NAME="gpt2_tensorrt_llm"
 NAME="tensorrt_llm_benchmarking_test"
-MODEL_REPOSITORY="$(pwd)/triton_model_repository"
+MODEL_REPOSITORY="$(pwd)/triton_model_repo"
 TENSORRTLLM_BACKEND_DIR="/opt/tritonserver/tensorrtllm_backend"
 GPT_DIR="$TENSORRTLLM_BACKEND_DIR/tensorrt_llm/examples/gpt"
 TOKENIZER_DIR="$GPT_DIR/gpt2"
-ENGINES_DIR="${BASE_DIR}/engines/inflight_batcher_llm/${NUM_GPUS}_gpu"
+ENGINES_DIR="${BASE_DIR}/engines/inflight_batcher_llm/${NUM_GPUS}-gpu"
 
 TRITON_DIR=${TRITON_DIR:="/opt/tritonserver"}
 SERVER=${TRITON_DIR}/bin/tritonserver
 BACKEND_DIR=${TRITON_DIR}/backends
 SERVER_LOG="${NAME}_server.log"
 SERVER_TIMEOUT=${SERVER_TIMEOUT:=120}
-SERVER_ARGS="--model-repository=${MODEL_REPOSITORY} --disable-auto-complete-config --backend-directory=${BACKEND_DIR} \
-            --backend-config=python,shm-region-prefix-name=prefix0_"
 
-# Select the GPUs that will be available to the inference server.
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:=0}
+function clone_tensorrt_llm_backend_repo {
+    rm -rf $TENSORRTLLM_BACKEND_DIR && mkdir $TENSORRTLLM_BACKEND_DIR
+    apt-get update && apt-get install git-lfs -y --no-install-recommends
+    git clone --single-branch --depth=1 -b ${TENSORRTLLM_BACKEND_REPO_TAG} https://github.com/triton-inference-server/tensorrtllm_backend.git $TENSORRTLLM_BACKEND_DIR
+    cd $TENSORRTLLM_BACKEND_DIR && git lfs install && git submodule update --init --recursive
+}
 
-function build_tensorrt_engine_inflight_batcher {
+function install_tensorrt_llm {
+    # Install CMake
+    bash ${TENSORRTLLM_BACKEND_DIR}/tensorrt_llm/docker/common/install_cmake.sh
+    export PATH="/usr/local/cmake/bin:${PATH}"
+
+    # PyTorch needs to be built from source for aarch64
+    ARCH="$(uname -i)"
+    if [ "${ARCH}" = "aarch64" ]; then
+        TORCH_INSTALL_TYPE="src_non_cxx11_abi"
+    else
+        TORCH_INSTALL_TYPE="pypi"
+    fi &&
+        (cd ${TENSORRTLLM_BACKEND_DIR}/tensorrt_llm &&
+            bash docker/common/install_pytorch.sh $TORCH_INSTALL_TYPE &&
+            python3 ./scripts/build_wheel.py --trt_root=/usr/local/tensorrt &&
+            pip3 install ./build/tensorrt_llm*.whl)
+}
+
+function build_gpt2_base_model {
+    cd ${GPT_DIR}
+
+    # Download weights from HuggingFace Transformers
+    rm -rf gpt2 && git clone https://huggingface.co/gpt2-medium gpt2
+    pushd gpt2 && rm pytorch_model.bin model.safetensors && wget -q https://huggingface.co/gpt2-medium/resolve/main/pytorch_model.bin && popd
+
+    # Convert weights from HF Tranformers to FT format
+    python3 hf_gpt_convert.py -p 8 -i gpt2 -o ./c-model/gpt2 --tensor-parallelism ${NUM_GPUS} --storage-type float16
+    cd ${BASE_DIR}
+}
+
+function build_gpt2_tensorrt_engine_inflight_batcher {
+    # Build TensorRT engines
     cd ${GPT_DIR}
     python3 build.py --model_dir="./c-model/gpt2/${NUM_GPUS}-gpu/" \
         --world_size="${NUM_GPUS}" \
@@ -68,36 +100,6 @@ function build_tensorrt_engine_inflight_batcher {
     cd ${BASE_DIR}
 }
 
-function build_base_model {
-    cd ${GPT_DIR}
-
-    # Download weights from HuggingFace Transformers
-    rm -rf gpt2 && git clone https://huggingface.co/gpt2-medium gpt2
-    pushd gpt2 && rm pytorch_model.bin model.safetensors && wget -q https://huggingface.co/gpt2-medium/resolve/main/pytorch_model.bin && popd
-
-    # Convert weights from HF Tranformers to FT format
-    python3 hf_gpt_convert.py -p 8 -i gpt2 -o ./c-model/gpt2 --tensor-parallelism ${NUM_GPUS} --storage-type float16
-    cd ${BASE_DIR}
-}
-
-function install_trt_llm {
-    # Install CMake
-    bash ${TENSORRTLLM_BACKEND_DIR}/tensorrt_llm/docker/common/install_cmake.sh
-    export PATH="/usr/local/cmake/bin:${PATH}"
-
-    # PyTorch needs to be built from source for aarch64
-    ARCH="$(uname -i)"
-    if [ "${ARCH}" = "aarch64" ]; then
-        TORCH_INSTALL_TYPE="src_non_cxx11_abi"
-    else
-        TORCH_INSTALL_TYPE="pypi"
-    fi
-    (cd $TENSORRTLLM_BACKEND_DIR/tensorrt_llm &&
-        bash docker/common/install_pytorch.sh $TORCH_INSTALL_TYPE &&
-        python3 ./scripts/build_wheel.py --trt_root="${TRT_ROOT}" &&
-        pip3 install ./build/tensorrt_llm*.whl)
-}
-
 function replace_config_tags {
     tag_to_replace="${1}"
     new_value="${2}"
@@ -105,56 +107,106 @@ function replace_config_tags {
     sed -i "s|${tag_to_replace}|${new_value}|g" ${config_file_path}
 }
 
-rm -rf $TENSORRTLLM_BACKEND_DIR && mkdir $TENSORRTLLM_BACKEND_DIR
-apt-get update && apt-get install git-lfs -y --no-install-recommends
-git clone --single-branch --depth=1 -b ${TENSORRTLLM_BACKEND_REPO_TAG} https://github.com/triton-inference-server/tensorrtllm_backend.git $TENSORRTLLM_BACKEND_DIR
-cd $TENSORRTLLM_BACKEND_DIR && git lfs install && git submodule update --init --recursive
+function prepare_model_repository {
+    rm -rf ${MODEL_REPOSITORY} && mkdir ${MODEL_REPOSITORY}
+    cp -r ${TENSORRTLLM_BACKEND_DIR}/all_models/inflight_batcher_llm/* ${MODEL_REPOSITORY}
+    rm -rf ${MODEL_REPOSITORY}/tensorrt_llm_bls
+    mv "${MODEL_REPOSITORY}/ensemble" "${MODEL_REPOSITORY}/${MODEL_NAME}"
 
-install_trt_llm
-build_base_model
-build_tensorrt_engine_inflight_batcher
-pip3 install tritonclient nvidia-ml-py3
+    replace_config_tags "model_version: -1" "model_version: 1" "${MODEL_REPOSITORY}/${MODEL_NAME}/config.pbtxt"
+    replace_config_tags '${triton_max_batch_size}' "128" "${MODEL_REPOSITORY}/${MODEL_NAME}/config.pbtxt"
+    replace_config_tags 'name: "ensemble"' "name: \"$MODEL_NAME\"" "${MODEL_REPOSITORY}/${MODEL_NAME}/config.pbtxt"
 
-rm -rf ${MODEL_REPOSITORY} && mkdir ${MODEL_REPOSITORY}
-cp -r ${TENSORRTLLM_BACKEND_DIR}/all_models/inflight_batcher_llm/* ${MODEL_REPOSITORY}
-rm -rf ${MODEL_REPOSITORY}/tensorrt_llm_bls
-cp -r ${ENGINES_DIR}/* ${MODEL_REPOSITORY}/tensorrt_llm/1
+    replace_config_tags '${triton_max_batch_size}' "128" "${MODEL_REPOSITORY}/preprocessing/config.pbtxt"
+    replace_config_tags '${preprocessing_instance_count}' '1' "${MODEL_REPOSITORY}/preprocessing/config.pbtxt"
+    replace_config_tags '${tokenizer_dir}' "${TOKENIZER_DIR}/" "${MODEL_REPOSITORY}/preprocessing/config.pbtxt"
+    replace_config_tags '${tokenizer_type}' 'auto' "${MODEL_REPOSITORY}/preprocessing/config.pbtxt"
 
-replace_config_tags '${triton_max_batch_size}' "128" "${MODEL_REPOSITORY}/ensemble/config.pbtxt"
-replace_config_tags '${triton_max_batch_size}' "128" "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
-replace_config_tags '${triton_max_batch_size}' "128" "${MODEL_REPOSITORY}/preprocessing/config.pbtxt"
-replace_config_tags '${preprocessing_instance_count}' '1' "${MODEL_REPOSITORY}/preprocessing/config.pbtxt"
-replace_config_tags '${postprocessing_instance_count}' '1' "${MODEL_REPOSITORY}/postprocessing/config.pbtxt"
-replace_config_tags '${triton_max_batch_size}' "128" "${MODEL_REPOSITORY}/postprocessing/config.pbtxt"
-replace_config_tags '${tokenizer_dir}' "${TOKENIZER_DIR}/" "${MODEL_REPOSITORY}/preprocessing/config.pbtxt"
-replace_config_tags '${tokenizer_dir}' "${TOKENIZER_DIR}/" "${MODEL_REPOSITORY}/postprocessing/config.pbtxt"
-replace_config_tags '${tokenizer_type}' 'auto' "${MODEL_REPOSITORY}/preprocessing/config.pbtxt"
-replace_config_tags '${tokenizer_type}' 'auto' "${MODEL_REPOSITORY}/postprocessing/config.pbtxt"
-replace_config_tags '${decoupled_mode}' 'True' "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
-replace_config_tags '${max_queue_delay_microseconds}' "1000000" "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
-replace_config_tags '${batching_strategy}' 'inflight_fused_batching' "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
-replace_config_tags '${max_queue_delay_microseconds}' "0" "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
-replace_config_tags '${engine_dir}' "${MODEL_REPOSITORY}/tensorrt_llm/1/" "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
-replace_config_tags "model_version: -1" "model_version: 1" "${MODEL_REPOSITORY}/ensemble/config.pbtxt"
+    replace_config_tags '${triton_max_batch_size}' "128" "${MODEL_REPOSITORY}/postprocessing/config.pbtxt"
+    replace_config_tags '${postprocessing_instance_count}' '1' "${MODEL_REPOSITORY}/postprocessing/config.pbtxt"
+    replace_config_tags '${tokenizer_dir}' "${TOKENIZER_DIR}/" "${MODEL_REPOSITORY}/postprocessing/config.pbtxt"
+    replace_config_tags '${tokenizer_type}' 'auto' "${MODEL_REPOSITORY}/postprocessing/config.pbtxt"
 
-run_server
-if (($SERVER_PID == 0)); then
-    echo -e "\n***\n*** Failed to start $SERVER\n***"
-    cat $SERVER_LOG
-    exit 1
-fi
+    replace_config_tags '${triton_max_batch_size}' "128" "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
+    replace_config_tags '${decoupled_mode}' 'true' "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
+    replace_config_tags '${max_queue_delay_microseconds}' "1000000" "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
+    replace_config_tags '${batching_strategy}' 'inflight_fused_batching' "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
+    replace_config_tags '${engine_dir}' "${ENGINES_DIR}" "${MODEL_REPOSITORY}/tensorrt_llm/config.pbtxt"
+}
+
+# Wait until server health endpoint shows ready. Sets WAIT_RET to 0 on
+# success, 1 on failure
+function wait_for_server_ready() {
+    local wait_time_secs="${1:-30}"
+    shift
+    local spids=("$@")
+
+    WAIT_RET=0
+
+    for _ in $(seq "$wait_time_secs"); do
+        for pid in "${spids[@]}"; do
+            if ! kill -0 "$pid" >/dev/null 2>&1; then
+                echo "=== Server not running."
+                WAIT_RET=1
+                return
+            fi
+        done
+
+        sleep 1
+
+        if curl -s --fail localhost:8000/v2/health/ready &&
+            curl -s --fail -w "%{http_code}" -o /dev/null -d '{"log_verbose_level":1}' localhost:8000/v2/logging; then
+            return
+        fi
+    done
+
+    echo "=== Timeout $wait_time_secs secs. Server not ready."
+    WAIT_RET=1
+}
+
+function run_server {
+    python3 ${TENSORRTLLM_BACKEND_DIR}/scripts/launch_triton_server.py --world_size="${NUM_GPUS}" --model_repo="${MODEL_REPOSITORY}" >${SERVER_LOG} 2>&1 &
+    sleep 2 # allow time to obtain the pid(s)
+    # Read PIDs into an array, trimming whitespaces
+    readarray -t SERVER_PID < <(pgrep "tritonserver")
+
+    wait_for_server_ready ${SERVER_TIMEOUT} "${SERVER_PID[@]}"
+    if [ "$WAIT_RET" != "0" ]; then
+        # Cleanup
+        kill "${SERVER_PID[@]}" >/dev/null 2>&1 || true
+        echo -e "\n***\n*** Failed to start $SERVER\n***"
+        cat $SERVER_LOG
+        exit 1
+    fi
+}
+
+function kill_server {
+    pgrep tritonserver | xargs kill -SIGINT
+    for pid in "${SERVER_PID[@]}"; do
+        echo "Waiting for proc ${pid} to terminate..."
+        while kill -0 $pid >/dev/null 2>&1; do
+            sleep 1
+        done
+    done
+}
+
+clone_tensorrt_llm_backend_repo
+install_tensorrt_llm
+build_gpt2_base_model
+build_gpt2_tensorrt_engine_inflight_batcher
+prepare_model_repository
 
 ARCH="amd64"
 STATIC_BATCH=1
 INSTANCE_CNT=1
 CONCURRENCY=100
-MODEL_FRAMEWORK="tensorrt"
+MODEL_FRAMEWORK="tensorrt-llm"
 PERF_CLIENT="perf_analyzer"
 REPORTER=../common/reporter.py
 INPUT_DATA="./input_data.json"
 PERF_CLIENT_PROTOCOL="grpc"
 EXPORT_FILE=profile-export-tensorrt-llm-model.json
-rm -rf $EXPORT_FILE *.tjson *.json *.csv
+rm -rf *.tjson *.json *.csv *log
 
 echo '{
   "data": [
@@ -168,18 +220,21 @@ echo '{
   ]
 }' >$INPUT_DATA
 
+# Set stability-percentage 999 to bypass the stability check in PA.
+# LLM generates a sequence of tokens that is unlikely to be within a reasonable bound to determine valid measurement in terms of latency.
+# Using "count_windows" measurement mode, which automatically extends the window for collecting responses.
 PERF_CLIENT_ARGS="-v -m $MODEL_NAME -i $PERF_CLIENT_PROTOCOL --async --streaming --input-data=$INPUT_DATA --profile-export-file=$EXPORT_FILE \
                   --shape=text_input:1 --shape=max_tokens:1 --shape=bad_words:1 --shape=stop_words:1 --measurement-mode=count_windows \
                   --concurrency-range=$CONCURRENCY --measurement-request-count=10 --stability-percentage=999"
 
 set +e
+run_server
+
 $PERF_CLIENT $PERF_CLIENT_ARGS -f ${NAME}.csv 2>&1 | tee ${NAME}_perf_analyzer.log
 set +o pipefail
-set -e
 
-kill $SERVER_PID
-wait $SERVER_PID
-rm -rf $MODEL_REPO $INPUT_DATA
+kill_server
+set -e
 
 echo -e "[{\"s_benchmark_kind\":\"benchmark_perf\"," >>${NAME}.tjson
 echo -e "\"s_benchmark_repo_branch\":\"${BENCHMARK_REPO_BRANCH}\"," >>${NAME}.tjson
@@ -201,7 +256,7 @@ if [ -f $REPORTER ]; then
         URL_FLAG="-u ${BENCHMARK_REPORTER_URL}"
     fi
 
-    python3 $REPORTER -v -o ${NAME}.json --csv ${NAME}.csv ${URL_FLAG} ${NAME}.tjson
+    python3 $REPORTER -v -e ${EXPORT_FILE} -o ${NAME}.json --csv ${NAME}.csv --gpu-metrics --token-latency ${URL_FLAG} ${NAME}.tjson
     if (($? != 0)); then
         RET=1
     fi
